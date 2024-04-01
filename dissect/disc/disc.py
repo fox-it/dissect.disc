@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from io import BytesIO
-from typing import BinaryIO, Iterator, Optional, Union
+from typing import BinaryIO, Iterator
 
 from dissect.cstruct import Instance
 from dissect.util.stream import RangeStream
@@ -27,19 +28,20 @@ from dissect.disc.exceptions import (
     NotASymlinkError,
 )
 
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
+log.setLevel(os.getenv("DISSECT_LOG_DISC", "CRITICAL"))
 
 
-class ISOFormats(Enum):
+class ISOFormat(Enum):
     PLAIN = "plain"
     ROCKRIDGE = "rockridge"
     JOLIET = "joliet"
 
 
 DEFAULT_FORMAT_PREFERENCE_ORDER = [
-    ISOFormats.ROCKRIDGE,
-    ISOFormats.JOLIET,
-    ISOFormats.PLAIN,
+    ISOFormat.ROCKRIDGE,
+    ISOFormat.JOLIET,
+    ISOFormat.PLAIN,
 ]
 
 
@@ -70,26 +72,33 @@ class DISC:
 
     """  # noqa: E501
 
-    def __init__(self, fh: BinaryIO, preference: Optional[ISOFormats] = None) -> None:
+    def __init__(self, fh: BinaryIO, preference: ISOFormat | None = None):
+        """Initialize a DISC filesystem object.
+
+        Args:
+            fh (BinaryIO): File-like object of the ISO file.
+            preference (ISOFormat, optional): Preferred format to treat this disc as. When left None, the disc will be
+                treated as the best available format. Defaults to None.
+        """
         self.fh = fh
-        self.iso_format = ISOFormats.PLAIN
+        self.iso_format = ISOFormat.PLAIN
         self.name_encoding = "utf-8"
 
         self.volume_descriptors = []
         self._path_table: dict = None
 
         self.primary_volumes = {
-            ISOFormats.PLAIN: None,
-            ISOFormats.JOLIET: None,
-            ISOFormats.ROCKRIDGE: None,
+            ISOFormat.PLAIN: None,
+            ISOFormat.JOLIET: None,
+            ISOFormat.ROCKRIDGE: None,
         }
 
         self._load_volume_descriptors()
 
-        if self.primary_volumes[ISOFormats.PLAIN] is None:
+        if self.primary_volumes[ISOFormat.PLAIN] is None:
             raise ValueError("No primary volume descriptor found.")
 
-        # To check for rockridge, we need to start parsing the disc as a plain ISO9660 one and then look for extended
+        # To check for Rockridge, we need to start parsing the disc as a plain ISO9660 one and then look for extended
         # attributes.
         self.logical_block_size = self.primary_volume.logical_block_size
         self._check_rockridge()
@@ -117,7 +126,7 @@ class DISC:
                 break
             if volume_descriptor.type == c_iso.ISO_VD_PRIMARY:
                 plain_primary_descriptor = c_iso.iso_primary_descriptor(volume_descriptor_bytes)
-                self.primary_volumes[ISOFormats.PLAIN] = plain_primary_descriptor
+                self.primary_volumes[ISOFormat.PLAIN] = plain_primary_descriptor
                 continue
 
             # Before the VD terminator volume, there is another one. This could possibly be a Joliet volume descriptor.
@@ -126,7 +135,7 @@ class DISC:
 
             # Check whether system id starts with a null byte, suggesting it is UTF-16-LE-encoded.
             if primary_volume.type == c_iso.ISO_VD_SUPPLEMENTARY and primary_volume.system_id[0] == 0x00:
-                self.primary_volumes[ISOFormats.JOLIET] = primary_volume
+                self.primary_volumes[ISOFormat.JOLIET] = primary_volume
 
     def _check_udf(self, volume_descriptor_end_pos: int) -> None:
         """Currently, UDF is not yet supported. We do a small check to see whether we encounter an Extended Area
@@ -138,20 +147,20 @@ class DISC:
         # Read 5 bytes, which would be the magic bytes if an Extended Area Descriptor is present.
         possible_identifier = self.fh.read(5)
         if possible_identifier in UDF_MAGICS:
-            logger.error(
+            log.error(
                 "dissect.disc does not (yet) support UDF or other ECMA-167 based filesystems."
                 "Errors are likely to occur."
             )
 
     def _check_rockridge(self) -> None:
-        """Check whether this disc is rockridge compatible."""
+        """Check whether this disc is Rockridge compatible."""
 
         # Rockridge is an implementation of the System Use Sharing Protocol (SUSP). So we first check for SUSP
         # compatibility, then for a RockRidge identifier.
 
         # To be able to check for the SUSP magic bytes we first need to parse the root record so we can skip past its
         # extent.
-        root_record = c_iso.iso_directory_record(self.primary_volumes[ISOFormats.PLAIN].root_directory_record)
+        root_record = c_iso.iso_directory_record(self.primary_volumes[ISOFormat.PLAIN].root_directory_record)
 
         # Skip past the root record
         self.fh.seek((self.logical_block_size * root_record.extent) + c_iso.ROOT_DIRECTORY_RECORD_LENGTH)
@@ -159,7 +168,7 @@ class DISC:
         if self.fh.read(6) != SUSP_MAGIC:
             return
 
-        # To determine whether or not the disc is compliant with rockridge, we need to traverse the root record
+        # To determine whether or not the disc is compliant with Rockridge, we need to traverse the root record
         # while making use of the features of SUSP.
         rockridge_root_record = SystemUseSharingProtocolDirectoryRecord(self, root_record)
 
@@ -167,7 +176,7 @@ class DISC:
         # This System Use Entry shall appear in the System Use Area of the first ("." or (00))
         # Directory Record of the root directory of the Directory Hierarchy in which the extension
         # specification to which this "ER" System Use Entry refers is used.
-        first_directory_record = next(rockridge_root_record.scandir())
+        first_directory_record = next(rockridge_root_record.iterdir())
 
         if first_directory_record.has_system_use_entry(SystemUseSignature.EXTENSIONS_REFERENCE):
             # We can use this to determine what extension is being used that uses SUSP.
@@ -177,12 +186,12 @@ class DISC:
             extensions_reference_entry = c_rockridge.SU_ER_s(extensions_reference_buf)
             identifier = extensions_reference_entry.identifier
             if identifier in ROCKRIDGE_MAGICS:
-                self.primary_volumes[ISOFormats.ROCKRIDGE] = self.primary_volumes[ISOFormats.PLAIN]
+                self.primary_volumes[ISOFormat.ROCKRIDGE] = self.primary_volumes[ISOFormat.PLAIN]
                 return
 
-        logger.error("Encountered SUSP-compliant disc but could not detect Rockridge: %s", identifier)
+        log.error("Encountered SUSP-compliant disc but could not detect Rockridge: %s", identifier)
 
-    def _select_format(self, preference: Optional[ISOFormats]) -> None:
+    def _select_format(self, preference: ISOFormat | None = None) -> None:
         """Given a preference, set the filesystem format with which a given disc should be handled if available. If
         not available, fall back on a format, trying preferred formats first.
         """
@@ -190,9 +199,9 @@ class DISC:
 
         # First try the user preference
         if preference is not None and self.primary_volumes[preference] is not None:
-            if preference == ISOFormats.JOLIET and self.primary_volumes[ISOFormats.ROCKRIDGE] is not None:
-                # Typically when both joliet and rockridge are available, rockridge holds more information.
-                logger.warning("Treating disc as Joliet even though Rockridge is available.")
+            if preference == ISOFormat.JOLIET and self.primary_volumes[ISOFormat.ROCKRIDGE] is not None:
+                # Typically when both Joliet and Rockridge are available, Rockridge holds more information.
+                log.warning("Treating disc as Joliet even though Rockridge is available.")
 
             self.iso_format = preference
         else:
@@ -201,7 +210,7 @@ class DISC:
             for fmt in DEFAULT_FORMAT_PREFERENCE_ORDER:
                 if self.primary_volumes[fmt] is not None:
                     if preference is not None:
-                        logger.warning(
+                        log.warning(
                             "%s format is not available for this disc. Falling back to %s.", preference.value, fmt.value
                         )
                     self.iso_format = fmt
@@ -213,7 +222,7 @@ class DISC:
         # Now that we know how we're going to treat the disc, we re-load the root record and the logical block size.
         root_record = c_iso.iso_directory_record(self.primary_volume.root_directory_record)
         self.logical_block_size = self.primary_volume.logical_block_size
-        if self.iso_format == ISOFormats.JOLIET:
+        if self.iso_format == ISOFormat.JOLIET:
             self.name_encoding = "utf-16-be"
 
         # Wrap the root_record in the appropriate class for the selected file format.
@@ -265,11 +274,11 @@ class DISC:
     def make_record(self, record: Instance) -> DirectoryRecord:
         """Wrap a iso_directory_record structure in the appropriate python representation based on the selected format
         of this disc."""
-        if self.iso_format == ISOFormats.ROCKRIDGE:
+        if self.iso_format == ISOFormat.ROCKRIDGE:
             return RockRidgeDirectoryRecord(self, record)
         return DirectoryRecord(self, record)
 
-    def get_entry(self, path: str, use_path_table: bool = False) -> DirectoryRecord:
+    def get(self, path: str, use_path_table: bool = False) -> DirectoryRecord:
         """Return an entry for a given path. For ISOs, this can be done in two ways: by using the path table, or by
         traversing the filesystem from the root record. Linux systems do not use the path table, Windows systems do."""
         requested_path = path
@@ -302,7 +311,7 @@ class DISC:
             return self.make_record(record)
 
         # The requested path is a file located in the directory we just looked up
-        for entry in self.make_record(record).scandir():
+        for entry in self.make_record(record).iterdir():
             if entry.name == filename:
                 return entry
         raise FileNotFoundError(requested_path)
@@ -311,7 +320,7 @@ class DISC:
 class DirectoryRecord:
     """A Python class representing an iso_directory_record."""
 
-    def __init__(self, disc_fs: DISC, record: Instance, parent: Optional[DirectoryRecord] = None):
+    def __init__(self, disc_fs: DISC, record: Instance, parent: DirectoryRecord | None = None):
         self.fs = disc_fs
         self.record = record
         self.is_dir = bool(record.flags.Directory)
@@ -326,7 +335,7 @@ class DirectoryRecord:
         if not self.is_dir:
             self.name, _, _ = self.name.partition(";")
 
-    def scandir(self) -> Iterator[DirectoryRecord]:
+    def iterdir(self) -> Iterator[DirectoryRecord]:
         """Yield DirectoryRecords"""
         self.fs.fh.seek(self.fs.logical_block_size * self.record.extent)
         block = self.fs.fh.read(self.record.size)
@@ -349,6 +358,10 @@ class DirectoryRecord:
             if offset % 2 != 0:
                 offset += 1
 
+    def listdir(self) -> dict[str, DirectoryRecord]:
+        """Return a dictionary of DirectoryRecords by name."""
+        return {record.name: record for record in self.iterdir()}
+
     def get(self, path: str) -> DirectoryRecord:
         """Get a directory record by path relative to this directory record"""
         if not self.is_dir:
@@ -362,7 +375,7 @@ class DirectoryRecord:
                 continue
 
             found = False
-            for entry in current_entry.scandir():
+            for entry in current_entry.iterdir():
                 if entry.name == elem:
                     current_entry = entry
                     found = True
@@ -389,52 +402,72 @@ class DirectoryRecord:
 
     @property
     def ctime(self) -> datetime:
-        """Plain ISO9660 have only one timestamp associated with them."""
+        """Creation time of this directory record."""
+
+        # Plain ISO9660 have only one timestamp associated with them.
         return parse_directory_record_datetime(self.record.date_time)
 
     @property
     def mtime(self) -> datetime:
-        """Plain ISO9660 have only one timestamp associated with them."""
+        """Modification time of this directory record."""
+
+        # Plain ISO9660 have only one timestamp associated with them.
         return parse_directory_record_datetime(self.record.date_time)
 
     @property
     def atime(self) -> datetime:
-        """Plain ISO9660 have only one timestamp associated with them."""
+        """Access time of this directory record."""
+
+        # Plain ISO9660 have only one timestamp associated with them.
         return parse_directory_record_datetime(self.record.date_time)
 
     def is_symlink(self) -> bool:
-        """Base ISO9660 does not support symlinks"""
+        """Returns whether this directory record represents a symlink."""
+
+        # Base ISO9660 does not support symlinks.
         return False
 
     def readlink(self) -> str:
+        """Returns what this symlink points to. Raises NotASymlinkError if this is not a symlink."""
+
         # Base ISO9660 does not support symlinks.
         raise NotASymlinkError()
 
     @property
     def mode(self) -> int:
+        """Return the mode of this directory record."""
+
         if self.record.ext_attr_length == 0:
             return 0o644
         raise NotImplementedError("Extended attribute record is available but not supported")
 
     @property
-    def user_id(self) -> int:
+    def uid(self) -> int:
+        """Return the user ID of this directory record."""
+
         if self.record.ext_attr_length == 0:
             return 0
         raise NotImplementedError("Extended attribute record is available but not supported")
 
     @property
-    def group_id(self) -> int:
+    def gid(self) -> int:
+        """Return the group ID of this directory record."""
+
         if self.record.ext_attr_length == 0:
             return 0
         raise NotImplementedError("Extended attribute record is available but not supported")
 
     @property
-    def links(self) -> int:
+    def nlinks(self) -> int:
+        """Return the number of links to this directory record."""
+
         # Not supported in base ISO9660
         return 1
 
     @property
     def inode(self) -> int:
+        """Return the inode of this directory record."""
+
         # Not supported in base ISO9660
         return 0
 
@@ -446,7 +479,7 @@ class SystemUseSharingProtocolDirectoryRecord(DirectoryRecord):
         self,
         disc_fs: DISC,
         record: Instance,
-        parent: Optional[SystemUseSharingProtocolDirectoryRecord] = None,
+        parent: SystemUseSharingProtocolDirectoryRecord | None = None,
     ) -> None:
         super().__init__(disc_fs, record, parent)
         self._system_use_entries: dict[RockRidgeSignature, list[Instance]] = defaultdict(list)
@@ -488,7 +521,7 @@ class SystemUseSharingProtocolDirectoryRecord(DirectoryRecord):
 
                 offset += len(unparsed_entry)
 
-    def get_system_use_entries(self, signature: Union[RockRidgeSignature, SystemUseSignature]) -> Iterator[bytes]:
+    def get_system_use_entries(self, signature: RockRidgeSignature | SystemUseSignature) -> Iterator[bytes]:
         """Traverses system use entries for a given signature, and yields their byte-stream so they can be re-parsed"""
         if signature.value not in self._system_use_entries:
             raise KeyError(signature)
@@ -496,28 +529,28 @@ class SystemUseSharingProtocolDirectoryRecord(DirectoryRecord):
             yield instance.dumps()
 
     def has_system_use_entry(
-        self, signature: Union[RockRidgeDirectoryRecord, SystemUseSharingProtocolDirectoryRecord]
+        self, signature: RockRidgeDirectoryRecord | SystemUseSharingProtocolDirectoryRecord
     ) -> bool:
         """Returns whether or not this directory record has one or more system use entries that have the given
         signature."""
         return signature.value in self._system_use_entries
 
-    def scandir(self) -> Iterator[SystemUseSharingProtocolDirectoryRecord]:
-        """We know that scandir() will instantiate the most specific type of DirectoryRecord (or subclass) possible, so
+    def iterdir(self) -> Iterator[SystemUseSharingProtocolDirectoryRecord]:
+        """We know that iterdir() will instantiate the most specific type of DirectoryRecord (or subclass) possible, so
         we also know that this class will produce SystemUseSharingProtocolDirectoryRecord instances or a subclass of it.
         We type hint accordingly to make readability a little better."""
-        return super().scandir()
+        return super().iterdir()
 
 
 class RockRidgeDirectoryRecord(SystemUseSharingProtocolDirectoryRecord):
     """A python class representing an iso_directory_record of a disc that is RockRidge compliant."""
 
-    def __init__(self, disc_fs: DISC, record: Instance, parent: Optional[RockRidgeDirectoryRecord] = None) -> None:
+    def __init__(self, disc_fs: DISC, record: Instance, parent: RockRidgeDirectoryRecord | None = None):
         super().__init__(disc_fs, record, parent)
         self._continued_name = False
 
-        self._symlink: Union[str, bool] = None
-        self._posix_entry: Union[str, bool] = None
+        self._symlink: str | bool | None = None
+        self._posix_entry: str | bool | None = None
 
         self._timestamps_initialized = False
         self.timestamps: dict[RockRidgeTimestampType, datetime] = dict()
@@ -668,8 +701,8 @@ class RockRidgeDirectoryRecord(SystemUseSharingProtocolDirectoryRecord):
             raise NotASymlinkError
         return self._symlink
 
-    def scandir(self) -> Iterator[RockRidgeDirectoryRecord]:
-        for record in super().scandir():
+    def iterdir(self) -> Iterator[RockRidgeDirectoryRecord]:
+        for record in super().iterdir():
             if record.has_system_use_entry(RockRidgeSignature.RELOCATED):
                 # This is a relocated entry, and should instead be ignored as it doesn't 'really' live here.
                 continue
@@ -711,28 +744,28 @@ class RockRidgeDirectoryRecord(SystemUseSharingProtocolDirectoryRecord):
         return super().mode
 
     @property
-    def group_id(self) -> int:
+    def gid(self) -> int:
         if self._posix_entry is None:
             self._resolve_posix()
         if self._posix_entry is not False:
             return self._posix_entry.uid
-        return super().group_id
+        return super().gid
 
     @property
-    def user_id(self) -> int:
+    def uid(self) -> int:
         if self._posix_entry is None:
             self._resolve_posix()
         if self._posix_entry is not False:
             return self._posix_entry.gid
-        return super().user_id
+        return super().uid
 
     @property
-    def links(self) -> int:
+    def nlinks(self) -> int:
         if self._posix_entry is None:
             self._resolve_posix()
         if self._posix_entry is not False:
             return self._posix_entry.links
-        return super().links
+        return super().nlinks
 
     @property
     def inode(self) -> int:

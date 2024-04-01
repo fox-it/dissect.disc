@@ -1,5 +1,12 @@
 name: Dissect CI
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - '*'
+  pull_request:
+  workflow_dispatch:
 
 jobs:
   ci:
@@ -14,7 +21,7 @@ jobs:
     permissions:
       id-token: write
     steps:
-      - uses: actions/download-artifact@v3
+      - uses: actions/download-artifact@v4
         with:
           name: packages
           path: dist/
@@ -25,5 +32,6 @@ jobs:
   trigger-tests:
     needs: [publish]
     uses: fox-it/dissect-workflow-templates/.github/workflows/dissect-ci-demand-test-template.yml@main
+    secrets: inherit
     with:
       on-demand-test: 'dissect.target'

@@ -39,7 +39,7 @@ struct SU_ER_s {
 struct RR_PX_s {
     char        signature[2];
     uint8_t     length;
-    uint8_t     version;      
+    uint8_t     version;
     uint32_t    mode;
     char        mode_be[4];
     uint32_t    links;
@@ -119,12 +119,12 @@ struct RR_PL_s {
 }
 
 struct rock_ridge_entry {
-    char  signature[2];
-    uint8_t  len;
-    uint8_t  version;
-    char  data[len - 4];
+    char    signature[2];
+    uint8_t len;
+    uint8_t version;
+    char    data[len - 4];
 };
-"""  # noqa
+"""  # noqa: E501
 
 c_rockridge = cstruct()
 c_rockridge.load(rockridge_def)
