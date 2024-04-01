@@ -118,6 +118,9 @@ class DISC:
             volume_descriptor_bytes = self.fh.read(2048)
             volume_descriptor = c_iso.iso_volume_descriptor(volume_descriptor_bytes)
 
+            if volume_descriptor.id != c_iso.ISO_STANDARD_ID
+                raise ValueError("Invalid volume descriptor ID")
+
             self.volume_descriptors.append(volume_descriptor)
             if volume_descriptor.type == c_iso.ISO_VD_END:
                 # This volume descriptor signifies the end of the volume descriptor set. To check whether a disc is

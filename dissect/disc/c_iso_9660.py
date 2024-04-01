@@ -7,7 +7,7 @@ iso_def = """
 #define ISO_VD_SUPPLEMENTARY            2
 #define ISO_VD_END                      255
 
-#define ISO_STANDARD_ID                 "CD001"
+#define ISO_STANDARD_ID                 b"CD001"
 
 #define ISOFS_BLOCK_SIZE                0x800
 
