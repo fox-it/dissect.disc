@@ -1,7 +1,7 @@
 import logging
 from typing import BinaryIO
 
-from dissect.disc.disc import DISC, ISOFormat, log
+from dissect.disc.disc import DISC, DiscFormat, log
 
 log.setLevel(logging.DEBUG)
 
@@ -9,7 +9,7 @@ log.setLevel(logging.DEBUG)
 def test_udf(udf_iso: BinaryIO, caplog) -> None:
     udf_fs = DISC(udf_iso)
     assert (
-        "dissect.disc does not (yet) support UDF or other ECMA-167 based filesystems.Errors are likely to occur."
+        "dissect.disc does not (yet) support UDF or other ECMA-167 based filesystems. Errors are likely to occur."
         in caplog.text
     )
-    assert udf_fs.iso_format == ISOFormat.PLAIN
+    assert udf_fs.selected_format == DiscFormat.ISO9660

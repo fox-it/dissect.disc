@@ -16,3 +16,11 @@ class NotASymlinkError(Error):
 
 class NotAFileError(Error):
     pass
+
+
+class NotUDFError(Error):
+    pass
+
+
+class NotRockridgeError(Error):
+    pass
