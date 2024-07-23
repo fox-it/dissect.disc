@@ -53,9 +53,7 @@ class DISC:
                 pass
 
         try:
-            if DiscFormat.ISO9660 in self.available_formats:
-                base_disc = self.available_formats[DiscFormat.ISO9660]
-                self.available_formats[DiscFormat.UDF] = load_udf(fh, base_disc)
+            self.available_formats[DiscFormat.UDF] = load_udf(fh)
         except NotUDFError:
             pass
 
@@ -83,6 +81,9 @@ class DISC:
             if preference == DiscFormat.JOLIET and DiscFormat.ROCKRIDGE in self.available_formats:
                 # Typically when both Joliet and Rockridge are available, Rockridge holds more information.
                 log.warning("Treating disc as Joliet even though Rockridge is available.")
+            elif preference != DiscFormat.UDF and DiscFormat.UDF in self.available_formats:
+                # UDF is the most modern standard and should be preferred over others
+                log.warning("Treating disc as %s even though UDF is available.", preference.value)
 
             self.selected_format = preference
         else:

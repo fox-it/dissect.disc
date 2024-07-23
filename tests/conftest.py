@@ -1,7 +1,7 @@
 import gzip
 import os
-
 from typing import Iterator
+
 import pytest
 
 
