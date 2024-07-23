@@ -4,7 +4,11 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, BinaryIO, Iterator
 
-from dissect.disc.exceptions import NotASymlinkError
+from dissect.disc.exceptions import (
+    FileNotFoundError,
+    NotADirectoryError,
+    NotASymlinkError,
+)
 
 
 class DiscFormat(Enum):
@@ -34,7 +38,26 @@ class DiscBaseEntry:
 
     def get(self, path: str) -> DiscBaseEntry:
         """Get a DiscBaseEntry relative to this one."""
-        raise NotImplementedError()
+        if not self.is_dir:
+            raise NotADirectoryError
+
+        queue = path.split("/")
+        current_entry = self
+        while len(queue):
+            elem = queue.pop(0)
+            if not elem:
+                continue
+
+            found = False
+            for entry in current_entry.iterdir():
+                if entry.name == elem:
+                    current_entry = entry
+                    found = True
+
+            if not found:
+                # Could not find a matching entry
+                raise FileNotFoundError(path)
+        return current_entry
 
     def iterdir(self) -> Iterator[DiscBaseEntry]:
         """Iterate over the contents of this directory."""
@@ -95,3 +118,8 @@ class DiscBaseEntry:
     def inode(self) -> int:
         """Return the inode number."""
         return 0
+
+    @property
+    def size(self) -> int:
+        """File size"""
+        raise NotImplementedError()

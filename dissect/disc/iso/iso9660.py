@@ -85,9 +85,23 @@ class ISO9660Disc(DiscBase):
                 return entry
         raise FileNotFoundError(requested_path)
 
+    def _decode_identifier(self, identifier: bytes) -> str:
+        identifier = identifier.decode(self.encoding).split()
+        if identifier:
+            return identifier[0]
+        return ""
+
     @property
     def name(self) -> str:
-        return self.primary_volume.volume_id.decode(self.encoding).split()[0]
+        return self._decode_identifier(self.primary_volume.volume_id)
+
+    @property
+    def application(self) -> str:
+        return self._decode_identifier(self.primary_volume.application_id)
+
+    @property
+    def publisher(self) -> str:
+        return self._decode_identifier(self.primary_volume.publisher_id)
 
     @property
     def logical_block_size(self) -> int:
@@ -143,11 +157,12 @@ class ISO9660DirectoryRecord(DiscBaseEntry):
         self.is_dir = bool(record.flags.Directory)
         self.parent = parent
 
-        self.name = record.name.decode(self.fs.encoding, errors="ignore")
-        if self.name == "\x00":
+        if record.name == b"\x00":
             self.name = "."
-        elif self.name == "\x01":
+        elif record.name == b"\x01":
             self.name = ".."
+        else:
+            self.name = record.name.decode(self.fs.encoding, errors="ignore")
 
         if not self.is_dir:
             self.name, _, _ = self.name.partition(";")
@@ -174,29 +189,6 @@ class ISO9660DirectoryRecord(DiscBaseEntry):
 
             if offset % 2 != 0:
                 offset += 1
-
-    def get(self, path: str) -> ISO9660DirectoryRecord:
-        """Get a directory record by path relative to this directory record"""
-        if not self.is_dir:
-            raise NotADirectoryError
-
-        queue = path.split("/")
-        current_entry = self
-        while len(queue):
-            elem = queue.pop(0)
-            if not elem:
-                continue
-
-            found = False
-            for entry in current_entry.iterdir():
-                if entry.name == elem:
-                    current_entry = entry
-                    found = True
-
-            if not found:
-                # Could not find a matching entry
-                raise FileNotFoundError(path)
-        return current_entry
 
     def open(self) -> RangeStream:
         """Construct a file-like object for reading the contents of this file"""
@@ -246,6 +238,11 @@ class ISO9660DirectoryRecord(DiscBaseEntry):
             return 0
         raise NotImplementedError("Extended attribute record is available but not supported")
 
+    @property
+    def size(self) -> int:
+        """Size of the entry in bytes"""
+        return self.record.size
+
 
 def parse_iso9660_timestamp(timestamp: type[c_iso.dec_datetime | c_iso.datetime_short]) -> datetime:
     """Parse the odd timestamp format of ISO9660. Works for both the LONG_FORM structure and the 7-byte structure."""
@@ -277,8 +274,8 @@ def load_iso9660_discs(fh: BinaryIO) -> Iterator[DiscFormat, ISO9660Disc]:
         volume_descriptor = c_iso.iso_volume_descriptor(volume_descriptor_bytes)
 
         if volume_descriptor.id != c_iso.ISO_STANDARD_ID:
-            raise ValueError("Invalid volume descriptor ID")
-
+            log.info("Invalid volume descriptor ID for ISO9660 disc: %s", volume_descriptor.id)
+            return
         volume_descriptors.append(volume_descriptor)
         if volume_descriptor.type == c_iso.ISO_VD_END:
             volume_descriptor_end_pos = fh.tell()

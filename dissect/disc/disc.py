@@ -44,19 +44,23 @@ class DISC:
         for disc_format, disc in load_iso9660_discs(self.fh):
             self.available_formats[disc_format] = disc
 
-        if bool(self.available_formats) is False:
-            raise ValueError("No compatible filesystem found on disc.")
+        if DiscFormat.ISO9660 in self.available_formats:
+            try:
+                self.available_formats[DiscFormat.ROCKRIDGE] = load_rockridge(
+                    fh, self.available_formats[DiscFormat.ISO9660]
+                )
+            except NotRockridgeError:
+                pass
 
-        base_disc = self.available_formats[DiscFormat.ISO9660]
         try:
-            self.available_formats[DiscFormat.ROCKRIDGE] = load_rockridge(fh, base_disc)
-        except NotRockridgeError:
-            pass
-
-        try:
-            self.available_formats[DiscFormat.UDF] = load_udf(fh, base_disc)
+            if DiscFormat.ISO9660 in self.available_formats:
+                base_disc = self.available_formats[DiscFormat.ISO9660]
+                self.available_formats[DiscFormat.UDF] = load_udf(fh, base_disc)
         except NotUDFError:
             pass
+
+        if bool(self.available_formats) is False:
+            raise ValueError("No compatible filesystem found on disc.")
 
         # At this point we know with which standards this disc is compatible. We can now choose to treat the DISC based
         # on the preference variable, and we will fall back to another format if the preference is not available.
@@ -94,8 +98,20 @@ class DISC:
                     break
 
         if self.selected_format is None:
-            raise ValueError("Could not select format for disc.")
+            raise RuntimeError("Could not select format for disc.")
 
     def get(self, path: str) -> DiscBaseEntry:
         """Get a DiscBaseEntry from an absolute path."""
         return self.fs.get(path)
+
+    @property
+    def name(self) -> str:
+        return self.fs.name
+
+    @property
+    def publisher(self) -> str:
+        return self.fs.publisher
+
+    @property
+    def application(self) -> str:
+        return self.fs.application
