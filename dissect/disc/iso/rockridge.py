@@ -36,22 +36,40 @@ class RockridgeDisc(ISO9660Disc):
         - https://docplayer.net/29621206-Ieee-p1281-system-use-sharing-protocol-draft-standard-version-1-12-adopted.html
     """
 
-    def make_record(self, record: c_iso.iso_directory_record) -> RockRidgeDirectoryRecord:
-        return RockRidgeDirectoryRecord(self, record)
+    def make_record(self, iso9660_record: c_iso.iso_directory_record) -> RockRidgeDirectoryRecord:
+        return RockRidgeDirectoryRecord(self, iso9660_record)
 
 
-class SystemUseSharingProtocolDirectoryRecord(ISO9660DirectoryRecord):
-    """A python class representing an iso_directory_record with System Use Entries in its System Use Area."""
+class RockRidgeDirectoryRecord(ISO9660DirectoryRecord):
+    """A python class representing an iso_directory_record of a disc that is RockRidge compliant."""
 
     def __init__(
         self,
-        fs: ISO9660Disc,
-        record: c_iso.iso_directory_record,
-        parent: SystemUseSharingProtocolDirectoryRecord | None = None,
-    ) -> None:
+        fs: RockridgeDisc,
+        record: c_iso.iso_direrectory_record,
+        parent: RockRidgeDirectoryRecord | None = None,
+    ):
         super().__init__(fs, record, parent)
-        self._system_use_entries: dict[RockRidgeSignature, list[c_rockridge.rock_ridge_entry]] = defaultdict(list)
+
+        self._system_use_entries: dict[
+            type[RockRidgeSignature | SystemUseSignature], list[c_rockridge.system_use_entry]
+        ] = defaultdict(list)
+
         self._process_system_use_area()
+
+        self._continued_name = False
+
+        self._symlink: str | bool | None = None
+        self._posix_entry: str | bool | None = None
+
+        self._timestamps_initialized = False
+        self.timestamps: dict[RockRidgeTimestampType, datetime] = dict()
+
+        self._set_name()
+
+        # Most occur after determining the name of this DirectoryRecord as relocated directory records have their name
+        # recorded in the initially encountered directory record.
+        self._resolve_relocation()
 
     def _process_system_use_area(self) -> None:
         """One-time function to traverse the System Use Area of this directory record and collect all System Usea
@@ -69,13 +87,13 @@ class SystemUseSharingProtocolDirectoryRecord(ISO9660DirectoryRecord):
             offset = 0
             byte_copy = block.read()
             while offset < len(byte_copy):
-                # The remainder of the system area is padded with null-bytes, so when we encounter a null byte we
+                # The remainder of the system use area is padded with null-bytes, so when we encounter a null byte we
                 # should stop
                 if byte_copy[offset:] == b"\x00":
                     break
                 # We now know the signature, version, length and data, allowing us to parse the data using the right
                 # structure definition
-                unparsed_entry = c_rockridge.rock_ridge_entry(byte_copy[offset:])
+                unparsed_entry = c_rockridge.system_use_entry(byte_copy[offset:])
                 self._system_use_entries[unparsed_entry.signature].append(unparsed_entry)
 
                 if unparsed_entry.signature == SystemUseSignature.CONTINUATION_AREA.value:
@@ -96,40 +114,10 @@ class SystemUseSharingProtocolDirectoryRecord(ISO9660DirectoryRecord):
         for instance in self._system_use_entries[signature.value]:
             yield instance.dumps()
 
-    def has_system_use_entry(
-        self, signature: RockRidgeDirectoryRecord | SystemUseSharingProtocolDirectoryRecord
-    ) -> bool:
+    def has_system_use_entry(self, signature: RockRidgeSignature | SystemUseSignature) -> bool:
         """Returns whether or not this directory record has one or more system use entries that have the given
         signature."""
         return signature.value in self._system_use_entries
-
-    def iterdir(self) -> Iterator[SystemUseSharingProtocolDirectoryRecord]:
-        """We know that iterdir() will instantiate the most specific type of DirectoryRecord (or subclass) possible, so
-        we also know that this class will produce SystemUseSharingProtocolDirectoryRecord instances or a subclass of it.
-        We type hint accordingly to make readability a little better."""
-        return super().iterdir()
-
-
-class RockRidgeDirectoryRecord(SystemUseSharingProtocolDirectoryRecord):
-    """A python class representing an iso_directory_record of a disc that is RockRidge compliant."""
-
-    def __init__(
-        self, fs: RockridgeDisc, record: c_iso.iso_directory_record, parent: RockRidgeDirectoryRecord | None = None
-    ):
-        super().__init__(fs, record, parent)
-        self._continued_name = False
-
-        self._symlink: str | bool | None = None
-        self._posix_entry: str | bool | None = None
-
-        self._timestamps_initialized = False
-        self.timestamps: dict[RockRidgeTimestampType, datetime] = dict()
-
-        self._set_name()
-
-        # Most occur after determining the name of this DirectoryRecord as relocated directory records have their name
-        # recorded in the initially encountered directory record.
-        self._resolve_relocation()
 
     def _set_name(self) -> None:
         """Check for alternative name system use entries and if present, use them to determine the name of this
@@ -360,11 +348,8 @@ def load_rockridge(fh: BinaryIO, base_disc: ISO9660Disc) -> RockridgeDisc:
     if fh.read(6) != SUSP_MAGIC:
         raise NotRockridgeError
 
-    # To determine whether or not the disc is compliant with Rockridge, we need to traverse the root record
-    # while making use of the features of SUSP.
-
-    # TODO: Merge SUSP and Rockridge into one class, considering we never use SUSP features other than for Rockridge
-    rockridge_root_record = SystemUseSharingProtocolDirectoryRecord(base_disc, base_disc.root_record.record)
+    # We have SUSP, but we need to check if it's Rockridge.
+    rockridge_root_record = RockRidgeDirectoryRecord(base_disc, base_disc.root_record.record)
 
     # From System Use Sharing Protocol documentation per the Extensions Reference record location:
     # This System Use Entry shall appear in the System Use Area of the first ("." or (00))
@@ -382,7 +367,10 @@ def load_rockridge(fh: BinaryIO, base_disc: ISO9660Disc) -> RockridgeDisc:
         if identifier in ROCKRIDGE_MAGICS:
             return RockridgeDisc(fh, base_disc.primary_volume, "utf-8")
         else:
-            log.error("Encountered SUSP-compliant disc but could not detect Rockridge: %s", identifier)
+            log.error(
+                "Encountered SUSP-compliant disc but could not detect Rockridge from extensions identifier '%s'",
+                identifier,
+            )
             raise NotRockridgeError
     else:
         log.error("Encountered SUSP-compliant disc but could not detect Rockridge.")
