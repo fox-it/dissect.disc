@@ -131,5 +131,4 @@ struct iso_path_table_entry {
 }
 """  # noqa: E501
 
-c_iso = cstruct()
-c_iso.load(iso_def)
+c_iso = cstruct().load(iso_def)

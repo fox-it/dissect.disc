@@ -7,8 +7,7 @@ udf_def = """
 #define     BEA_DESCRIPTOR_MAGIC    b"BEA01"
 """
 
-c_udf = cstruct()
-c_udf.load(udf_def)
+c_udf = cstruct().load(udf_def)
 
 UDF_MAGICS = [
     c_udf.NSR_DESCRIPTOR_MAGIC,

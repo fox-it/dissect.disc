@@ -6,7 +6,6 @@ from datetime import datetime
 from io import BytesIO
 from typing import BinaryIO, Iterator
 
-from dissect.cstruct import Instance
 from dissect.util.stream import RangeStream
 
 from dissect.disc.exceptions import NotASymlinkError, NotRockridgeError
@@ -37,7 +36,7 @@ class RockridgeDisc(ISO9660Disc):
         - https://docplayer.net/29621206-Ieee-p1281-system-use-sharing-protocol-draft-standard-version-1-12-adopted.html
     """
 
-    def make_record(self, record: Instance) -> RockRidgeDirectoryRecord:
+    def make_record(self, record: c_iso.iso_directory_record) -> RockRidgeDirectoryRecord:
         return RockRidgeDirectoryRecord(self, record)
 
 
@@ -47,11 +46,11 @@ class SystemUseSharingProtocolDirectoryRecord(ISO9660DirectoryRecord):
     def __init__(
         self,
         fs: ISO9660Disc,
-        record: Instance,
+        record: c_iso.iso_directory_record,
         parent: SystemUseSharingProtocolDirectoryRecord | None = None,
     ) -> None:
         super().__init__(fs, record, parent)
-        self._system_use_entries: dict[RockRidgeSignature, list[Instance]] = defaultdict(list)
+        self._system_use_entries: dict[RockRidgeSignature, list[c_rockridge.rock_ridge_entry]] = defaultdict(list)
         self._process_system_use_area()
 
     def _process_system_use_area(self) -> None:
@@ -114,7 +113,9 @@ class SystemUseSharingProtocolDirectoryRecord(ISO9660DirectoryRecord):
 class RockRidgeDirectoryRecord(SystemUseSharingProtocolDirectoryRecord):
     """A python class representing an iso_directory_record of a disc that is RockRidge compliant."""
 
-    def __init__(self, fs: RockridgeDisc, record: Instance, parent: RockRidgeDirectoryRecord | None = None):
+    def __init__(
+        self, fs: RockridgeDisc, record: c_iso.iso_directory_record, parent: RockRidgeDirectoryRecord | None = None
+    ):
         super().__init__(fs, record, parent)
         self._continued_name = False
 

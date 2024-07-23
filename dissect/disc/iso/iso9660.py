@@ -4,7 +4,6 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import BinaryIO, Iterator
 
-from dissect.cstruct import Instance
 from dissect.util.stream import RangeStream
 
 from dissect.disc.base import DiscBase, DiscBaseEntry, DiscFormat
@@ -29,7 +28,11 @@ class ISO9660Disc(DiscBase):
     """
 
     def __init__(
-        self, fh: BinaryIO, primary_volume: Instance, volume_descriptor_end_pos: int, encoding: str = "utf-8"
+        self,
+        fh: BinaryIO,
+        primary_volume: c_iso.iso_primary_descriptor,
+        volume_descriptor_end_pos: int,
+        encoding: str = "utf-8",
     ) -> None:
         super().__init__(fh)
         self.primary_volume = primary_volume
@@ -41,7 +44,7 @@ class ISO9660Disc(DiscBase):
 
         self.root_record = self.make_record(c_iso.iso_directory_record(self.primary_volume.root_directory_record))
 
-    def make_record(self, record: Instance) -> ISO9660DirectoryRecord:
+    def make_record(self, record: c_iso.iso_directory_record) -> ISO9660DirectoryRecord:
         return ISO9660DirectoryRecord(self, record)
 
     def get(self, path: str, use_path_table: bool = False) -> ISO9660DirectoryRecord:
@@ -132,7 +135,9 @@ class ISO9660Disc(DiscBase):
 class ISO9660DirectoryRecord(DiscBaseEntry):
     """A Python class representing an iso_directory_record."""
 
-    def __init__(self, fs: ISO9660Disc, record: Instance, parent: ISO9660DirectoryRecord | None = None):
+    def __init__(
+        self, fs: ISO9660Disc, record: c_iso.iso_directory_record, parent: ISO9660DirectoryRecord | None = None
+    ):
         self.fs = fs
         self.record = record
         self.is_dir = bool(record.flags.Directory)
@@ -242,7 +247,7 @@ class ISO9660DirectoryRecord(DiscBaseEntry):
         raise NotImplementedError("Extended attribute record is available but not supported")
 
 
-def parse_iso9660_timestamp(timestamp: Instance) -> datetime:
+def parse_iso9660_timestamp(timestamp: type[c_iso.dec_datetime | c_iso.datetime_short]) -> datetime:
     """Parse the odd timestamp format of ISO9660. Works for both the LONG_FORM structure and the 7-byte structure."""
     tz = timezone(timedelta(minutes=timestamp.offset * 15))
     return datetime(
@@ -268,7 +273,7 @@ def load_iso9660_discs(fh: BinaryIO) -> Iterator[DiscFormat, ISO9660Disc]:
     joliet_primary_volume = None
 
     while True:
-        volume_descriptor_bytes = fh.read(2048)
+        volume_descriptor_bytes = fh.read(c_iso.ISOFS_BLOCK_SIZE)
         volume_descriptor = c_iso.iso_volume_descriptor(volume_descriptor_bytes)
 
         if volume_descriptor.id != c_iso.ISO_STANDARD_ID:

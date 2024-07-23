@@ -126,8 +126,7 @@ struct rock_ridge_entry {
 };
 """  # noqa: E501
 
-c_rockridge = cstruct()
-c_rockridge.load(rockridge_def)
+c_rockridge = cstruct().load(rockridge_def)
 
 SUSP_MAGIC = b"SP\x07\x01\xbe\xef"
 ROCKRIDGE_MAGICS = [b"RRIP_1991A", b"IEEE_P1282", b"IEEE_1282"]
