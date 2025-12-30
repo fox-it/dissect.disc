@@ -1,5 +1,7 @@
-from dissect.disc.disc import DISC
-from dissect.disc.exceptions import (
+from __future__ import annotations
+
+from dissect.disc.disc import Disc
+from dissect.disc.exception import (
     Error,
     FileNotFoundError,
     NotADirectoryError,
@@ -7,7 +9,7 @@ from dissect.disc.exceptions import (
 )
 
 __all__ = [
-    "DISC",
+    "Disc",
     "Error",
     "FileNotFoundError",
     "NotADirectoryError",

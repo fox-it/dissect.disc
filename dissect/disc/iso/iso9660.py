@@ -1,179 +1,219 @@
 from __future__ import annotations
 
-import logging
+import io
 from datetime import datetime, timedelta, timezone
+from functools import cached_property
+from io import BytesIO
 from typing import TYPE_CHECKING, BinaryIO
 
-from dissect.disc.base import DiscBase, DiscBaseEntry, DiscFormat
-from dissect.disc.exceptions import FileNotFoundError, NotAFileError
-from dissect.disc.iso.c_iso_9660 import c_iso
 from dissect.util.stream import RangeStream
 
-log = logging.getLogger(__name__)
+from dissect.disc.base import BaseDisc, BaseEntry
+from dissect.disc.exception import FileNotFoundError, IsADirectoryError
+from dissect.disc.iso.c_iso9660 import c_iso
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from typing_extensions import Self
 
-class ISO9660Disc(DiscBase):
-    """A Python class representing a ISO9660-compliant disc. As Joliet is basically ISO9660 with UTF-16-le encoding,
-    this class also supports Joliet discs.
+
+class ISO9660(BaseDisc):
+    """Disc implementation that is ISO9660 compliant.
+
+    As Joliet is basically ISO9660 with UTF-16-BE encoding, this implementation also supports Joliet discs.
 
     References:
         - http://www.idea2ic.com/File_Formats/iso9660.pdf
         - https://wiki.osdev.org/ISO_9660
         - https://pismotec.com/cfs/iso9660-1999.html
-
-    Joliet references:
         - https://github.com/torvalds/linux/blob/master/fs/isofs/joliet.c
         - http://littlesvr.ca/isomaster/resources/JolietSpecification.html
+
+    Args:
+        fh: File-like object of the ISO file.
     """
 
-    def __init__(
-        self,
-        fh: BinaryIO,
-        primary_volume: c_iso.iso_primary_descriptor,
-        volume_descriptor_end_pos: int,
-        encoding: str = "utf-8",
-    ) -> None:
+    def __init__(self, fh: BinaryIO, encoding: str = "utf-8") -> None:
         super().__init__(fh)
-        self.primary_volume = primary_volume
         self.encoding = encoding
+        self.primary_volume = self._find_primary_volume_descriptor()
 
-        self.volume_descriptors = []
-        self._path_table: dict = None
-        self.volume_descriptor_end_pos = volume_descriptor_end_pos
+        self.root = self._make_record(c_iso.iso_directory_record(self.primary_volume.root_directory_record))
 
-        self.root_record = self.make_record(c_iso.iso_directory_record(self.primary_volume.root_directory_record))
+    def _find_primary_volume_descriptor(self) -> c_iso.iso_primary_descriptor:
+        for block, descriptor in read_descriptors(self.fh):
+            if descriptor.type == c_iso.ISO_VD_PRIMARY:
+                return c_iso.iso_primary_descriptor(block)
+        else:
+            raise ValueError("No ISO9660 primary volume descriptor found")
 
-    def make_record(self, record: c_iso.iso_directory_record) -> ISO9660DirectoryRecord:
-        return ISO9660DirectoryRecord(self, record)
+    @property
+    def name(self) -> str:
+        return decode_identifier(self.primary_volume.volume_id, self.encoding)
 
-    def get(self, path: str, use_path_table: bool = False) -> ISO9660DirectoryRecord:
-        """Return an entry for a given path. For ISOs, this can be done in two ways: by using the path table, or by
-        traversing the filesystem from the root record. Linux systems do not use the path table, Windows systems do."""
-        requested_path = path
+    @property
+    def application(self) -> str:
+        return decode_identifier(self.primary_volume.application_id, self.encoding)
 
+    @property
+    def publisher(self) -> str:
+        return decode_identifier(self.primary_volume.publisher_id, self.encoding)
+
+    @property
+    def block_size(self) -> int:
+        return self.primary_volume.logical_block_size
+
+    def _make_record(self, record: c_iso.iso_directory_record) -> ISO9660Entry:
+        return ISO9660Entry(self, record)
+
+    def get(self, path: str, use_path_table: bool = False) -> ISO9660Entry:
+        """Return an entry for a given path.
+
+        For ISOs, this can be done in two ways: by using the path table, or by traversing the filesystem from the root
+        record. Linux systems do not use the path table, Windows systems do.
+        """
         # Remove trailing slash and left-pad with leading slash
         if not path.startswith("/"):
             path = "/" + path
         path = path.removesuffix("/")
 
         if not use_path_table:
-            return self.root_record.get(path)
-        filename = None
-        if path not in self.path_table:
+            return self.root.get(path)
+
+        lookup_path = path
+        lookup_filename = None
+        if lookup_path not in self.path_table:
             # Only directories are in the path table, so if we can't find the initial path maybe we need to look up
             # its parent directory first.
-            path, _, filename = path.rpartition("/")
-            if not path:
-                path = "/"
+            lookup_path, _, lookup_filename = lookup_path.rpartition("/")
 
         # Either the parent or the requested path itself should be in the path table
-        if path not in self.path_table:
-            raise FileNotFoundError(requested_path)
+        if lookup_path not in self.path_table:
+            raise FileNotFoundError(path)
 
-        extent = self.path_table[path]
-        self.fh.seek(extent * self.logical_block_size)
+        extent = self.path_table[lookup_path]
+        self.fh.seek(extent * self.block_size)
         record = c_iso.iso_directory_record(self.fh)
-        if filename is None:
+
+        if lookup_filename is None:
             # The requested path is the record we have just looked up
-            return self.make_record(record)
+            return self._make_record(record)
 
         # The requested path is a file located in the directory we just looked up
-        for entry in self.make_record(record).iterdir():
-            if entry.name == filename:
+        for entry in self._make_record(record).iterdir():
+            if entry.name == lookup_filename:
                 return entry
-        raise FileNotFoundError(requested_path)
 
-    def _decode_identifier(self, identifier: bytes) -> str:
-        identifier = identifier.decode(self.encoding).split()
-        if identifier:
-            return identifier[0]
-        return ""
+        raise FileNotFoundError(path)
 
-    @property
-    def name(self) -> str:
-        return self._decode_identifier(self.primary_volume.volume_id)
-
-    @property
-    def application(self) -> str:
-        return self._decode_identifier(self.primary_volume.application_id)
-
-    @property
-    def publisher(self) -> str:
-        return self._decode_identifier(self.primary_volume.publisher_id)
-
-    @property
-    def logical_block_size(self) -> int:
-        return self.primary_volume.logical_block_size
-
-    @property
+    @cached_property
     def path_table(self) -> dict[str, int]:
-        """Parse the path table and create a dict of paths and the corresponding extent of their directory record."""
-        if self._path_table is not None:
-            return self._path_table
+        """Parse the path table and create a map of paths and the corresponding extent of their directory record."""
+        table = {}
 
-        self._path_table = {}
+        self.fh.seek(self.primary_volume.type_l_path_table * self.block_size)
+        buf = BytesIO(self.fh.read(self.primary_volume.path_table_size))
 
-        self.fh.seek(self.primary_volume.type_l_path_table * self.logical_block_size)
-        path_table_bytes = self.fh.read(self.primary_volume.path_table_size)
-
-        offset = 0
         index = 1
         entries: dict[int, str] = {}
 
-        while offset < self.primary_volume.path_table_size:
-            entry = c_iso.iso_path_table_entry(path_table_bytes[offset:])
+        while buf.tell() < self.primary_volume.path_table_size:
+            entry = c_iso.iso_path_table_entry(buf)
+
             if index == 1:
-                entries[1] = "/"
-                self._path_table["/"] = entry.extent_location
+                entries[index] = ""
+                table[""] = entry.extent_location
             else:
                 entry_name = entry.name.decode(self.encoding)
                 parent_path = entries[entry.parent_dir_no]
-                seperator = "/" if parent_path != "/" else ""
-                entry_path = parent_path + seperator + entry_name
+                entry_path = f"{parent_path}/{entry_name}"
 
                 entries[index] = entry_path
-                self._path_table[entry_path] = entry.extent_location
+                table[entry_path] = entry.extent_location
 
-            entry_size = len(entry)
-            offset += entry_size
-            if entry_size % 2 != 0:
-                offset += 1
+            if len(entry) % 2 != 0:
+                # Align to even byte boundary
+                buf.seek(1, io.SEEK_CUR)
 
             index += 1
 
-        return self._path_table
+        return table
 
 
-class ISO9660DirectoryRecord(DiscBaseEntry):
-    """A Python class representing an iso_directory_record."""
+class ISO9660Entry(BaseEntry):
+    """A file or directory entry in a ISO9660 filesystem."""
 
-    def __init__(
-        self, fs: ISO9660Disc, record: c_iso.iso_directory_record, parent: ISO9660DirectoryRecord | None = None
-    ):
-        self.fs = fs
-        self.record = record
-        self.is_dir = bool(record.flags.Directory)
-        self.parent = parent
+    disc: ISO9660
+    entry: c_iso.iso_directory_record
 
-        if record.name == b"\x00":
-            self.name = "."
-        elif record.name == b"\x01":
-            self.name = ".."
+    @cached_property
+    def name(self) -> str:
+        if self.entry.name == b"\x00":
+            name = "."
+        elif self.entry.name == b"\x01":
+            name = ".."
         else:
-            self.name = record.name.decode(self.fs.encoding, errors="ignore")
+            name = self.entry.name.decode(self.disc.encoding, errors="ignore")
 
-        if not self.is_dir:
-            self.name, _, _ = self.name.partition(";")
+        if not self.is_dir():
+            name, _, _ = name.partition(";")
 
-    def iterdir(self) -> Iterator[ISO9660DirectoryRecord]:
-        """Yield DirectoryRecords"""
-        self.fs.fh.seek(self.fs.logical_block_size * self.record.extent)
-        block = self.fs.fh.read(self.record.size)
+        return name
+
+    @property
+    def inode(self) -> int:
+        # Use the extent as a makeshift inode number
+        return self.entry.extent
+
+    @property
+    def mode(self) -> int:
+        if self.entry.ext_attr_length == 0:
+            return 0o644
+        raise NotImplementedError("Extended attribute record is available but not supported")
+
+    @property
+    def uid(self) -> int:
+        if self.entry.ext_attr_length == 0:
+            return 0
+        raise NotImplementedError("Extended attribute record is available but not supported")
+
+    @property
+    def gid(self) -> int:
+        if self.entry.ext_attr_length == 0:
+            return 0
+        raise NotImplementedError("Extended attribute record is available but not supported")
+
+    @property
+    def atime(self) -> datetime:
+        # Plain ISO9660 have only one timestamp associated with them.
+        return parse_iso9660_timestamp(self.entry.date_time)
+
+    @property
+    def mtime(self) -> datetime:
+        # Plain ISO9660 have only one timestamp associated with them.
+        return parse_iso9660_timestamp(self.entry.date_time)
+
+    @property
+    def ctime(self) -> datetime:
+        # Plain ISO9660 have only one timestamp associated with them.
+        return parse_iso9660_timestamp(self.entry.date_time)
+
+    @property
+    def size(self) -> int:
+        """Size of the entry in bytes"""
+        return self.entry.size
+
+    def is_dir(self) -> bool:
+        """Return whether this entry is a directory."""
+        return bool(self.entry.flags.Directory)
+
+    def iterdir(self) -> Iterator[Self]:
+        """Iterate over the contents of this directory."""
+        self.disc.fh.seek(self.entry.extent * self.disc.block_size)
+        block = self.disc.fh.read(self.size)
+
         offset = 0
-
         while True:
             first_byte = block[offset : offset + 1]
 
@@ -184,7 +224,7 @@ class ISO9660DirectoryRecord(DiscBaseEntry):
             record = c_iso.iso_directory_record(block[offset:])
 
             # Instantiate a new instance of whatever class 'self' belongs to.
-            yield type(self)(self.fs, record, self)
+            yield type(self)(self.disc, record)
 
             offset += len(record)
 
@@ -192,57 +232,25 @@ class ISO9660DirectoryRecord(DiscBaseEntry):
                 offset += 1
 
     def open(self) -> RangeStream:
-        """Construct a file-like object for reading the contents of this file"""
-        if self.is_dir:
-            raise NotAFileError(self.name)
+        """Open the file for reading."""
+        if self.is_dir():
+            raise IsADirectoryError(self.name)
 
         # Haven't come across an ISO yet where the file was interleaved.
-        if self.record.interleave:
-            raise NotImplementedError("Interleaved mode not supported for ISO files.")
+        if self.entry.interleave:
+            raise NotImplementedError("Interleaved mode not supported for ISO files")
 
         return RangeStream(
-            self.fs.fh,
-            self.record.extent * self.fs.logical_block_size,
-            self.record.size,
+            self.disc.fh,
+            self.entry.extent * self.disc.block_size,
+            self.size,
         )
 
-    @property
-    def ctime(self) -> datetime:
-        # Plain ISO9660 have only one timestamp associated with them.
-        return parse_iso9660_timestamp(self.record.date_time)
 
-    @property
-    def mtime(self) -> datetime:
-        # Plain ISO9660 have only one timestamp associated with them.
-        return parse_iso9660_timestamp(self.record.date_time)
-
-    @property
-    def atime(self) -> datetime:
-        # Plain ISO9660 have only one timestamp associated with them.
-        return parse_iso9660_timestamp(self.record.date_time)
-
-    @property
-    def mode(self) -> int:
-        if self.record.ext_attr_length == 0:
-            return 0o644
-        raise NotImplementedError("Extended attribute record is available but not supported")
-
-    @property
-    def uid(self) -> int:
-        if self.record.ext_attr_length == 0:
-            return 0
-        raise NotImplementedError("Extended attribute record is available but not supported")
-
-    @property
-    def gid(self) -> int:
-        if self.record.ext_attr_length == 0:
-            return 0
-        raise NotImplementedError("Extended attribute record is available but not supported")
-
-    @property
-    def size(self) -> int:
-        """Size of the entry in bytes"""
-        return self.record.size
+def decode_identifier(identifier: bytes, encoding: str) -> str:
+    if identifier := identifier.decode(encoding).split():
+        return identifier[0]
+    return ""
 
 
 def parse_iso9660_timestamp(timestamp: type[c_iso.dec_datetime | c_iso.datetime_short]) -> datetime:
@@ -259,44 +267,33 @@ def parse_iso9660_timestamp(timestamp: type[c_iso.dec_datetime | c_iso.datetime_
     )
 
 
-def load_iso9660_discs(fh: BinaryIO) -> Iterator[DiscFormat, ISO9660Disc]:
-    """Try to parse a given file handle for available formats of ISO9660 discs. This includes 'plain' ISO9660 and
-    Joliet."""
+def read_descriptors(fh: BinaryIO) -> Iterator[tuple[bytes, c_iso.iso_volume_descriptor]]:
+    """Read all volume descriptors from the ISO9660 disc image.
+
+    Args:
+        fh: The file-like object representing the disc image.
+    """
     fh.seek(c_iso.SYSTEM_AREA_SIZE)
-
-    volume_descriptors = []
-
-    volume_descriptor_end_pos = 0
-    iso9660_primary_volume = None
-    joliet_primary_volume = None
-
     while True:
-        volume_descriptor_bytes = fh.read(c_iso.ISOFS_BLOCK_SIZE)
-        volume_descriptor = c_iso.iso_volume_descriptor(volume_descriptor_bytes)
+        block = fh.read(c_iso.ISOFS_BLOCK_SIZE)
+        volume_descriptor = c_iso.iso_volume_descriptor(block)
 
         if volume_descriptor.id != c_iso.ISO_STANDARD_ID:
-            log.info("Invalid volume descriptor ID for ISO9660 disc: %s", volume_descriptor.id)
-            return
-        volume_descriptors.append(volume_descriptor)
+            raise ValueError(f"Invalid volume descriptor ID for ISO9660 disc: {volume_descriptor.id!r}")
+
+        yield block, volume_descriptor
+
         if volume_descriptor.type == c_iso.ISO_VD_END:
-            volume_descriptor_end_pos = fh.tell()
             break
 
-        if volume_descriptor.type == c_iso.ISO_VD_PRIMARY:
-            iso9660_primary_volume = c_iso.iso_primary_descriptor(volume_descriptor_bytes)
-            continue
 
-        # Before the VD terminator volume, there is another one. This could possibly be a Joliet volume descriptor.
-        # Re-parse as a primary volume
-        primary_volume = c_iso.iso_primary_descriptor(volume_descriptor_bytes)
+def load_iso9660(fh: BinaryIO) -> ISO9660 | None:
+    """Load an ISO9660 disc if it is compatible.
 
-        # Check whether system id starts with a null byte, suggesting it is UTF-16-LE-encoded.
-        if primary_volume.type == c_iso.ISO_VD_SUPPLEMENTARY and primary_volume.system_id[0] == 0x00:
-            joliet_primary_volume = primary_volume
-
-    if iso9660_primary_volume is None:
-        raise ValueError("No primary volume descriptor found")
-
-    yield DiscFormat.ISO9660, ISO9660Disc(fh, iso9660_primary_volume, volume_descriptor_end_pos)
-    if joliet_primary_volume is not None:
-        yield DiscFormat.JOLIET, ISO9660Disc(fh, joliet_primary_volume, volume_descriptor_end_pos, encoding="utf-16-be")
+    Args:
+        fh: The file-like object representing the disc image.
+    """
+    try:
+        return ISO9660(fh)
+    except ValueError:
+        return None

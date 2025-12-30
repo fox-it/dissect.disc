@@ -1,27 +1,30 @@
 from __future__ import annotations
 
 from enum import Enum
+from functools import cached_property
 from typing import TYPE_CHECKING, Any, BinaryIO
 
-if TYPE_CHECKING:
-    from collections.abc import Iterator
-    from datetime import datetime
-
-from dissect.disc.exceptions import (
+from dissect.disc.exception import (
     FileNotFoundError,
     NotADirectoryError,
     NotASymlinkError,
 )
 
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from datetime import datetime
 
-class DiscFormat(Enum):
+    from typing_extensions import Self
+
+
+class Format(Enum):
     ISO9660 = "iso9660"
     ROCKRIDGE = "rockridge"
     JOLIET = "joliet"
     UDF = "udf"
 
 
-class DiscBase:
+class BaseDisc:
     def __init__(self, fh: BinaryIO) -> None:
         self.fh = fh
 
@@ -30,99 +33,125 @@ class DiscBase:
         """Return the name of this disc."""
         raise NotImplementedError
 
-    def get(self, path: str) -> DiscBaseEntry:
+    @property
+    def application(self) -> str:
+        """Return the application identifier of this disc."""
+        raise NotImplementedError
+
+    @property
+    def publisher(self) -> str:
+        """Return the publisher identifier of this disc."""
+        raise NotImplementedError
+
+    def get(self, path: str) -> BaseEntry:
         """Get a DiscBaseEntry from an absolute path."""
         raise NotImplementedError
 
 
-class DiscBaseEntry:
-    def __init__(self, fs: DiscBase, entry: Any, parent: DiscBaseEntry | None = None):
+class BaseEntry:
+    def __init__(self, disc: BaseDisc, entry: Any):
+        self.disc = disc
+        self.entry = entry
+
+    @cached_property
+    def name(self) -> str:
+        """The name of this entry."""
         raise NotImplementedError
 
-    def get(self, path: str) -> DiscBaseEntry:
-        """Get a DiscBaseEntry relative to this one."""
-        if not self.is_dir:
-            raise NotADirectoryError
+    @property
+    def inode(self) -> int:
+        """The inode number."""
+        return 0
 
-        queue = path.split("/")
-        current_entry = self
-        while len(queue):
-            elem = queue.pop(0)
-            if not elem:
-                continue
+    @property
+    def nlinks(self) -> int:
+        """The number of links."""
+        return 1
 
-            found = False
-            for entry in current_entry.iterdir():
-                if entry.name == elem:
-                    current_entry = entry
-                    found = True
+    @property
+    def mode(self) -> int:
+        """The file mode."""
+        return 0o644
 
-            if not found:
-                # Could not find a matching entry
-                raise FileNotFoundError(path)
-        return current_entry
+    @property
+    def uid(self) -> int:
+        """The owner user ID."""
+        return 0
 
-    def iterdir(self) -> Iterator[DiscBaseEntry]:
-        """Iterate over the contents of this directory."""
+    @property
+    def gid(self) -> int:
+        """The owner group ID."""
+        return 0
+
+    @property
+    def atime(self) -> datetime:
+        """The access time."""
         raise NotImplementedError
 
-    def listdir(self) -> dict[str, DiscBaseEntry]:
-        """Return a dictionary of DirectoryRecords by name."""
-        return {record.name: record for record in self.iterdir()}
-
-    def open(self) -> BinaryIO:
-        """Open the file for reading."""
+    @property
+    def mtime(self) -> datetime:
+        """The modification time."""
         raise NotImplementedError
+
+    @property
+    def ctime(self) -> datetime:
+        """The creation time."""
+        raise NotImplementedError
+
+    @property
+    def btime(self) -> datetime:
+        """The birth time."""
+        raise NotImplementedError
+
+    @property
+    def size(self) -> int:
+        """The file size."""
+        raise NotImplementedError
+
+    def is_dir(self) -> bool:
+        """Return whether this entry is a directory."""
+        raise NotImplementedError
+
+    def is_file(self) -> bool:
+        """Return True if this entry is a regular file."""
+        return not self.is_dir() and not self.is_symlink()
 
     def is_symlink(self) -> bool:
         """Return True if this entry is a symlink."""
         return False
 
-    @property
-    def atime(self) -> datetime:
-        """Return the access time."""
-        raise NotImplementedError
+    def get(self, path: str) -> BaseEntry:
+        """Get a entry relative to this one."""
+        if not self.is_dir():
+            raise NotADirectoryError
 
-    @property
-    def mtime(self) -> datetime:
-        """Return the modification time."""
-        raise NotImplementedError
+        current = self
+        for part in path.split("/"):
+            if not part:
+                continue
 
-    @property
-    def ctime(self) -> datetime:
-        """Return the creation time."""
+            for entry in current.iterdir():
+                if entry.name == part:
+                    current = entry
+                    break
+            else:
+                # Could not find a matching entry
+                raise FileNotFoundError(path)
+
+        return current
+
+    def listdir(self) -> dict[str, Self]:
+        """Return a dictionary of the entries in this directory by name."""
+        return {entry.name: entry for entry in self.iterdir()}
+
+    def iterdir(self) -> Iterator[Self]:
+        """Iterate over the contents of this directory."""
         raise NotImplementedError
 
     def readlink(self) -> str:
         """Return the target of the symlink."""
         raise NotASymlinkError
 
-    @property
-    def mode(self) -> int:
-        """Return the file mode."""
-        return 0o644
-
-    @property
-    def uid(self) -> int:
-        """Return the user ID."""
-        return 0
-
-    @property
-    def gid(self) -> int:
-        """Return the group ID."""
-        return 0
-
-    @property
-    def nlinks(self) -> int:
-        """Return the number of links."""
-        return 1
-
-    @property
-    def inode(self) -> int:
-        """Return the inode number."""
-        return 0
-
-    @property
-    def size(self) -> int:
-        """File size"""
+    def open(self) -> BinaryIO:
+        """Open the file for reading."""
         raise NotImplementedError

@@ -1,7 +1,8 @@
+from __future__ import annotations
+
 from dissect.cstruct import cstruct
 
 iso_def = """
-
 /* Volume descriptor types */
 #define ISO_VD_PRIMARY                  1
 #define ISO_VD_SUPPLEMENTARY            2
@@ -16,32 +17,32 @@ iso_def = """
 #define ROOT_DIRECTORY_RECORD_LENGTH    0x22
 
 struct iso_volume_descriptor {
-    uint8_t type;
-    char    id[5];
-    uint8_t version;
-    char    data[2041];
+    uint8_t         type;
+    char            id[5];
+    uint8_t         version;
+    char            data[2041];
 };
 
 struct dec_datetime {
-    char    year[4];
-    char    month[2];
-    char    day[2];
-    char    hour[2];
-    char    minute[2];
-    char    second[2];
-    char    centiseconds[2];
-    int8_t  offset;
-}
+    char            year[4];
+    char            month[2];
+    char            day[2];
+    char            hour[2];
+    char            minute[2];
+    char            second[2];
+    char            centiseconds[2];
+    int8_t          offset;
+};
 
 struct datetime_short {
-    uint8_t year;
-    uint8_t month;
-    uint8_t day;
-    uint8_t hour;
-    uint8_t minute;
-    uint8_t second;
-    int8_t  offset;
-}
+    uint8_t         year;
+    uint8_t         month;
+    uint8_t         day;
+    uint8_t         hour;
+    uint8_t         minute;
+    uint8_t         second;
+    int8_t          offset;
+};
 
 struct iso_primary_descriptor {
     uint8_t         type;
@@ -82,53 +83,53 @@ struct iso_primary_descriptor {
     char            unused4;
     char            application_data[512];
     char            unused5[653];
-}
+};
 
 struct iso_directory_record_datetime {
-    uint8_t year;
-    uint8_t month;
-    uint8_t day;
-    uint8_t hour;
-    uint8_t minute;
-    uint8_t second;
-    int8_t  offset;
-}
+    uint8_t         year;
+    uint8_t         month;
+    uint8_t         day;
+    uint8_t         hour;
+    uint8_t         minute;
+    uint8_t         second;
+    int8_t          offset;
+};
 
 struct iso_directory_record_flags {
-    uint8_t Hidden:1;
-    uint8_t Directory:1;
-    uint8_t AssociatedFile:1;
-    uint8_t ExtendedAttributeRecordContainsInformation:1;
-    uint8_t OwnerAndGroupPermissionsAreSet:1;
-    uint8_t Reserved:2;
-    uint8_t SpansMultipleExtents:1;
-}
+    uint8_t         Hidden : 1;
+    uint8_t         Directory : 1;
+    uint8_t         AssociatedFile : 1;
+    uint8_t         ExtendedAttributeRecordContainsInformation : 1;
+    uint8_t         OwnerAndGroupPermissionsAreSet : 1;
+    uint8_t         Reserved : 2;
+    uint8_t         SpansMultipleExtents : 1;
+};
 
 struct iso_directory_record {
-    uint8_t                         length;
-    uint8_t                         ext_attr_length;
-    uint32_t                        extent;
-    char                            extent_be[4];
-    uint32_t                        size;
-    char                            size_be[4];
+    uint8_t         length;
+    uint8_t         ext_attr_length;
+    uint32_t        extent;
+    char            extent_be[4];
+    uint32_t        size;
+    char            size_be[4];
     iso_directory_record_datetime   date_time;
     iso_directory_record_flags      flags;
-    uint8_t                         file_unit_size;
-    uint8_t                         interleave;
-    uint16_t                        volume_sequence_number;
-    char                            volume_sequence_number_be[2];
-    uint8_t                         name_len;
-    char                            name[name_len];
-    char                            system_use[length - name_len - 33];
-}
+    uint8_t         file_unit_size;
+    uint8_t         interleave;
+    uint16_t        volume_sequence_number;
+    char            volume_sequence_number_be[2];
+    uint8_t         name_len;
+    char            name[name_len];
+    char            system_use[length - name_len - 33];
+};
 
 struct iso_path_table_entry {
-    uint8_t     directory_id_len;
-    uint8_t     ext_attr_rec_len;
-    uint32_t    extent_location;
-    uint16_t    parent_dir_no;
-    char        name[directory_id_len];
-}
+    uint8_t         directory_id_len;
+    uint8_t         ext_attr_rec_len;
+    uint32_t        extent_location;
+    uint16_t        parent_dir_no;
+    char            name[directory_id_len];
+};
 """
 
 c_iso = cstruct().load(iso_def)

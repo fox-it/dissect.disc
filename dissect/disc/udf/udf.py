@@ -6,15 +6,14 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import TYPE_CHECKING, BinaryIO
 
-from dissect.disc.base import DiscBase, DiscBaseEntry
-from dissect.disc.exceptions import (
+from dissect.util.stream import MappingStream, RangeStream
+
+from dissect.disc.base import BaseDisc, BaseEntry
+from dissect.disc.exception import (
     NotADirectoryError,
-    NotAFileError,
     NotASymlinkError,
-    NotUDFError,
 )
 from dissect.disc.udf.c_udf import c_udf
-from dissect.util.stream import MappingStream, RangeStream
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -31,24 +30,8 @@ SECTOR_SIZES = [
 AVDP_SECTOR = 256
 
 
-def load_udf(fh: BinaryIO) -> UDFDisc:
-    """Load a UDF disc from a file handle. Raise NotUDFError if it is not a UDF disc."""
-    sector_size = get_udf_sector_size(fh)
-    if sector_size is None:
-        raise NotUDFError
-
-    return UDFDisc(fh, sector_size)
-
-
-class UDFDisc(DiscBase):
-    """A python class representing a UDF-formatted disc.
-
-    References:
-        - https://docplayer.net/237090850-Ecma-tr-universal-disk-format-udf-specification-part-3-revision-2-50-1st-edition-december-reference-number-ecma-123-2009.html
-        - https://ecma-international.org/wp-content/uploads/ECMA-167_3rd_edition_june_1997.pdf
-        - https://github.com/torvalds/linux/blob/master/fs/udf/ecma_167.h
-        - http://web.archive.org/web/20060427084950/homepage.mac.com/wenguangwang/myhome/udf.html#udf-vol-struct
-        - http://www.osta.org/specs/pdf/udf260.pdf
+class UDF(BaseDisc):
+    """Disc implementation that is UDF compliant.
 
     Currently not implemented:
         - Multiple partition descriptors
@@ -57,12 +40,26 @@ class UDFDisc(DiscBase):
         - Metadata Partition
         - Virtual Partition
 
-        For all of these, any ISOs containing such features would be greatly appreciated for testing.
+    For all of these, any ISOs containing such features would be greatly appreciated for testing.
+
+    References:
+        - https://docplayer.net/237090850-Ecma-tr-universal-disk-format-udf-specification-part-3-revision-2-50-1st-edition-december-reference-number-ecma-123-2009.html
+        - https://ecma-international.org/wp-content/uploads/ECMA-167_3rd_edition_june_1997.pdf
+        - https://github.com/torvalds/linux/blob/master/fs/udf/ecma_167.h
+        - http://web.archive.org/web/20060427084950/homepage.mac.com/wenguangwang/myhome/udf.html#udf-vol-struct
+        - http://www.osta.org/specs/pdf/udf260.pdf
+
+    Args:
+        fh: File-like object of the UDF disc.
+        sector_size: Sector size of the UDF disc.
     """
 
-    def __init__(self, fh: BinaryIO, sector_size: int):
+    def __init__(self, fh: BinaryIO):
         self.fh = fh
-        self.sector_size = sector_size
+        self.sector_size = find_udf_sector_size(fh)
+
+        if self.sector_size is None:
+            raise ValueError("Could not determine UDF sector size")
 
         self.logical_volume_descriptor = None
         self._physical_partition_map: dict[int, c_udf.udf_partition_descriptor] = {}
@@ -79,30 +76,30 @@ class UDFDisc(DiscBase):
         file_set_descriptor_buf = self._read_extent_from_long_ad(lvd_file_set_descriptor)
         root_file_descriptor = c_udf.udf_file_set_descriptor(file_set_descriptor_buf)
 
-        self.root_entry = self._file_entry_from_icb(root_file_descriptor.root_directory_icb, "/", "/")
+        self.root = self._file_entry_from_icb(root_file_descriptor.root_directory_icb, "/", "/")
 
     def get(self, path: str) -> UDFEntry:
         """Get a file entry by path."""
         if path == "/":
-            return self.root_entry
-        return self.root_entry.get(path)
+            return self.root
+        return self.root.get(path)
 
     @property
     def name(self) -> str:
         return read_dstring(self.primary_volume_descriptor.volume_identifier)
 
     @property
-    def publisher(self) -> str:
-        return self.primary_volume_descriptor.application_identifier.identifier.decode().rstrip("\x00")
-
-    @property
     def application(self) -> str:
         return self.primary_volume_descriptor.implementation_identifier.identifier.decode().rstrip("\x00")
+
+    @property
+    def publisher(self) -> str:
+        return self.primary_volume_descriptor.application_identifier.identifier.decode().rstrip("\x00")
 
     def _read_extent_from_long_ad(self, extent_ad: c_udf.udf_long_allocation_descriptor) -> bytes:
         """Read an extent from a long allocation descriptor."""
         partition = self.partition_map[extent_ad.extent_location.partition_reference_number]
-        return partition.open_extent(extent_ad.extent_location.logical_block_number, extent_ad.extent_length).read()
+        return partition.open(extent_ad.extent_location.logical_block_number, extent_ad.extent_length).read()
 
     def _load_volume_descriptors(self) -> None:
         """Starting from the anchor volume descriptor pointer, load all volume descriptors."""
@@ -196,24 +193,95 @@ class UDFDisc(DiscBase):
         return UDFEntry(self, partition, path, name, root_entry)
 
 
-class UDFEntry(DiscBaseEntry):
+class UDFEntry(BaseEntry):
+    fs: UDF
+    entry: type[c_udf.udf_file_entry | c_udf.udf_extended_file_entry]
+
     def __init__(
         self,
-        disc: UDFDisc,
+        disc: UDF,
         partition: UDFPartition,
         path: str,
         name: str,
         entry: type[c_udf.udf_file_entry | c_udf.udf_extended_file_entry],
     ):
+        super().__init__(disc, entry)
+
         self.disc = disc
         self.partition = partition
         self.path = path
         self.name = name
         self.entry = entry
 
-        self.is_dir = self.entry.icb_tag.file_type == c_udf.udf_icb_file_type.DIRECTORY
         self.allocation_type = c_udf.udf_icb_tag_allocation_type(self.entry.icb_tag.flags.allocation_type)
         self.extents = None
+
+    @property
+    def inode(self) -> int:
+        return self.entry.unique_id
+
+    @property
+    def nlinks(self) -> int:
+        return self.entry.file_link_count
+
+    @property
+    def mode(self) -> int:
+        # UDF stores permissions slightly differently. The special bits are stored in the ICBTag.
+        # User, group and other permissions are ordered differently than in stat, so we shift & mask them.
+        # Based on: https://github.com/torvalds/linux/blob/cb273eb7c8390c70a484db6c79a797e377db09b5/fs/udf/inode.c#L1639
+
+        isuid = stat.S_ISUID if self.entry.icb_tag.flags.S_ISUID else 0
+        isgid = stat.S_ISGID if self.entry.icb_tag.flags.S_ISGID else 0
+        isvt = stat.S_ISVTX if self.entry.icb_tag.flags.C_ISVTX else 0
+
+        return (
+            ((self.entry.permissions) & 0o007)  # User read,write,execute
+            | ((self.entry.permissions >> 2) & 0o0070)  # Group read,write,execute
+            | ((self.entry.permissions >> 4) & 0o0700)  # Other read,write,execute
+            | isuid
+            | isgid
+            | isvt
+        )
+
+    @property
+    def uid(self) -> int:
+        return self.entry.uid
+
+    @property
+    def gid(self) -> int:
+        return self.entry.gid
+
+    @property
+    def atime(self) -> datetime:
+        return parse_udf_timestamp(self.entry.access_time)
+
+    @property
+    def mtime(self) -> datetime:
+        return parse_udf_timestamp(self.entry.modification_time)
+
+    @property
+    def ctime(self) -> datetime:
+        return parse_udf_timestamp(self.entry.attribute_time)
+
+    @property
+    def btime(self) -> datetime:
+        return parse_udf_timestamp(self.entry.creation_time)
+
+    @property
+    def size(self) -> int:
+        # For extended file entries, the object size holds the sum of all information lengths of all streams of a file.
+        # Currently we haven't come across ISOs with streams, so we warn if these values are not the same, indicating
+        # streams are in fact available.
+        if (
+            isinstance(self.entry, c_udf.udf_extended_file_entry)
+            and self.entry.object_size != self.entry.information_length
+        ):
+            if not self.disc.warned_named_streams:
+                log.critical("This UDF disc contains named streams, which are not yet supported")
+                self.disc.warned_named_streams = True
+            return self.entry.object_size
+
+        return self.entry.information_length
 
     def _load_extents(self) -> Iterator[tuple[UDFPartition, int, int]]:
         """A file entry can have multiple extents which can be found by parsing its associated allocation descriptors.
@@ -245,12 +313,18 @@ class UDFEntry(DiscBaseEntry):
         else:
             raise ValueError(f"Unsupported allocation type {self.allocation_type}")
 
+    def is_dir(self) -> bool:
+        return self.entry.icb_tag.file_type == c_udf.udf_icb_file_type.DIRECTORY
+
+    def is_symlink(self) -> bool:
+        return self.entry.icb_tag.file_type == c_udf.udf_icb_file_type.SYMLINK
+
     def iterdir(self) -> Iterator[UDFEntry]:
-        """To iterate a directory, we open the stream associated with this entry and parse the file identifiers"""
-        if not self.is_dir:
+        if not self.is_dir():
             raise NotADirectoryError
 
-        stream = self.open(open_as_directory=True)
+        # To iterate a directory, we open the stream associated with this entry and parse the file identifiers
+        stream = self.open()
         first = True
         while True:
             if stream.tell() >= self.size:
@@ -258,9 +332,8 @@ class UDFEntry(DiscBaseEntry):
 
             descriptor = c_udf.udf_file_identifier_descriptor(stream)
 
-            # TODO: Could perhaps be replaced with an aligned stream, though it seems a bit overkill.
-            while stream.tell() % 4 != 0:
-                stream.read(1)
+            if (align := (-stream.tell() % 4)) != 0:
+                stream.read(align)
 
             if first:
                 # "First is first, last is last" - Luigi
@@ -274,10 +347,40 @@ class UDFEntry(DiscBaseEntry):
 
             yield self.disc._file_entry_from_icb(descriptor.icb, path, identifier)
 
-    def open(self, open_as_directory: bool = False) -> BinaryIO:
-        if self.is_dir and not open_as_directory:
-            raise NotAFileError
+    def readlink(self) -> str:
+        if not self.is_symlink():
+            raise NotASymlinkError(self.name)
 
+        stream = self.open()
+        target = ""
+        first = True
+        while True:
+            try:
+                component = c_udf.udf_path_component(stream)
+            except EOFError:
+                break
+
+            if not first:
+                target += "/"
+            else:
+                first = False
+
+            component_type = c_udf.udf_component_type(component.component_type)
+            if component_type == c_udf.udf_component_type.PARENT:
+                target += ".."
+            elif component_type == c_udf.udf_component_type.CURDIR:
+                target += "."
+            elif component_type == c_udf.udf_component_type.IDENTIFIER:
+                target += read_dchars(component.component_identifier)
+            elif component_type == c_udf.udf_component_type.ROOT:
+                target = "/"
+                first = True
+            else:
+                raise NotImplementedError(f"Unsupported path component type {component_type}")
+
+        return target
+
+    def open(self) -> BinaryIO:
         # Contents of file is contained within the allocation descriptor.
         if self.allocation_type == c_udf.udf_icb_tag_allocation_type.embedded:
             return BytesIO(self.entry.allocation_descriptors)
@@ -288,126 +391,23 @@ class UDFEntry(DiscBaseEntry):
         stream = MappingStream(size=self.size)
         offset = 0
         for partition, extent_position, extent_length in self.extents:
-            stream.add(offset, extent_length, partition.open_extent(extent_position, extent_length))
+            stream.add(offset, extent_length, partition.open(extent_position, extent_length))
             offset += extent_length
 
         return stream
-
-    def is_symlink(self) -> bool:
-        return self.entry.icb_tag.file_type == c_udf.udf_icb_file_type.SYMLINK
-
-    def readlink(self) -> str:
-        if not self.is_symlink():
-            raise NotASymlinkError
-        stream = self.open()
-        path = ""
-        first = True
-        while True:
-            try:
-                component = c_udf.udf_path_component(stream)
-            except EOFError:
-                break
-
-            if not first:
-                path += "/"
-            else:
-                first = False
-
-            component_type = c_udf.udf_component_type(component.component_type)
-            if component_type == c_udf.udf_component_type.PARENT:
-                path += ".."
-            elif component_type == c_udf.udf_component_type.CURDIR:
-                path += "."
-            elif component_type == c_udf.udf_component_type.IDENTIFIER:
-                path += read_dchars(component.component_identifier)
-            elif component_type == c_udf.udf_component_type.ROOT:
-                path = "/"
-                first = True
-            else:
-                raise NotImplementedError(f"Unsupported path component type {component_type}")
-
-        return path
-
-    @property
-    def atime(self) -> datetime:
-        return parse_udf_timestamp(self.entry.access_time)
-
-    @property
-    def mtime(self) -> datetime:
-        return parse_udf_timestamp(self.entry.modification_time)
-
-    @property
-    def ctime(self) -> datetime:
-        return parse_udf_timestamp(self.entry.attribute_time)
-
-    @property
-    def btime(self) -> datetime:
-        return parse_udf_timestamp(self.entry.creation_time)
-
-    @property
-    def mode(self) -> int:
-        # UDF stores permissions slightly differently. The special bits are stored in the ICBTag.
-        # User, group and other permissions are ordered differently than in stat, so we shift & mask them.
-        # Based on: https://github.com/torvalds/linux/blob/cb273eb7c8390c70a484db6c79a797e377db09b5/fs/udf/inode.c#L1639
-
-        isuid = stat.S_ISUID if self.entry.icb_tag.flags.S_ISUID else 0
-        isgid = stat.S_ISGID if self.entry.icb_tag.flags.S_ISGID else 0
-        isvt = stat.S_ISVTX if self.entry.icb_tag.flags.C_ISVTX else 0
-
-        return (
-            ((self.entry.permissions) & 0o007)  # User read,write,execute
-            | ((self.entry.permissions >> 2) & 0o0070)  # Group read,write,execute
-            | ((self.entry.permissions >> 4) & 0o0700)  # Other read,write,execute
-            | isuid
-            | isgid
-            | isvt
-        )
-
-    @property
-    def uid(self) -> int:
-        return self.entry.uid
-
-    @property
-    def gid(self) -> int:
-        return self.entry.gid
-
-    @property
-    def nlinks(self) -> int:
-        return self.entry.file_link_count
-
-    @property
-    def inode(self) -> int:
-        return self.entry.unique_id
-
-    @property
-    def size(self) -> int:
-        # For extended file entries, the object size holds the sum of all information lengths of all streams of a file.
-        # Currently we haven't come across ISOs with streams, so we warn if these values are not the same, indicating
-        # streams are in fact available.
-
-        if (
-            isinstance(self.entry, c_udf.udf_extended_file_entry)
-            and self.entry.object_size != self.entry.information_length
-        ):
-            if not self.disc.warned_named_streams:
-                log.critical("This UDF disc contains named streams, which are not yet supported")
-                self.disc.warned_named_streams = True
-            return self.entry.object_size
-
-        return self.entry.information_length
 
 
 class UDFPartition:
     """A partition on a UDF disc that starts at a certain offset into the file handle."""
 
-    def __init__(self, fs: UDFDisc, physical_partition_descriptor: c_udf.udf_partition_descriptor) -> None:
-        self.fs = fs
+    def __init__(self, disc: UDF, physical_partition_descriptor: c_udf.udf_partition_descriptor) -> None:
+        self.disc = disc
         self.physical_partition_descriptor = physical_partition_descriptor
 
-    def open_extent(self, logical_block_num: int, length: int) -> RangeStream:
-        offset_into_fh = self.physical_partition_descriptor.partition_starting_location * self.fs.sector_size
-        offset_into_partition = logical_block_num * self.fs.sector_size
-        return RangeStream(self.fs.fh, offset_into_fh + offset_into_partition, length)
+    def open(self, logical_block_num: int, length: int) -> RangeStream:
+        offset_into_fh = self.physical_partition_descriptor.partition_starting_location * self.disc.sector_size
+        offset_into_partition = logical_block_num * self.disc.sector_size
+        return RangeStream(self.disc.fh, offset_into_fh + offset_into_partition, length)
 
 
 class UDFSparablePartition(UDFPartition):
@@ -420,11 +420,11 @@ class UDFSparablePartition(UDFPartition):
 
     def __init__(
         self,
-        fs: UDFDisc,
+        disc: UDF,
         sparable_partition_map: c_udf.udf_sparable_partition_map,
         physical_partition_descriptor: c_udf.udf_partition_descriptor,
     ) -> None:
-        super().__init__(fs, physical_partition_descriptor)
+        super().__init__(disc, physical_partition_descriptor)
 
         self.packet_length = sparable_partition_map.packet_length
         self.remappings: dict[int, int] = {}
@@ -432,19 +432,19 @@ class UDFSparablePartition(UDFPartition):
         sparing_tables = BytesIO(sparable_partition_map.sparing_tables)
         for i in range(sparable_partition_map.number_of_sparing_tables):
             table_location = c_udf.uint32(sparing_tables)
-            self.fs.fh.seek(table_location * self.fs.sector_size)
-            table_buf = self.fs.fh.read(sparable_partition_map.sparing_table_size)
+            self.disc.fh.seek(table_location * self.disc.sector_size)
+            table_buf = self.disc.fh.read(sparable_partition_map.sparing_table_size)
             sparing_table = c_udf.udf_sparing_table(table_buf)
             mappings_buf = sparing_table.map_entry_buf
             for i in range(0, len(mappings_buf), 8):
                 mapping = c_udf.udf_map_entry(mappings_buf[i : i + 8])
                 self.remappings[mapping.original_location] = mapping.mapped_location
 
-    def open_extent(self, logical_block_num: int, length: int) -> RangeStream:
+    def open(self, logical_block_num: int, length: int) -> RangeStream:
         if logical_block_num in self.remappings or logical_block_num in self.remappings.values():
             logical_block_num = self.remappings[logical_block_num]
             raise NotImplementedError("Sparable Partition not yet tested: remapped position requested")
-        return super().open_extent(logical_block_num, length)
+        return super().open(logical_block_num, length)
 
 
 class UDFVirtualPartition(UDFPartition):
@@ -453,13 +453,13 @@ class UDFVirtualPartition(UDFPartition):
 
     def __init__(
         self,
-        fs: UDFDisc,
+        disc: UDF,
         virtual_partition_map: c_udf.udf_virtual_partition_map,
         physical_partition_descriptor: c_udf.udf_partition_descriptor,
     ) -> None:
-        super().__init__(fs, physical_partition_descriptor)
+        super().__init__(disc, physical_partition_descriptor)
 
-    def open_extent(self, logical_block_num: int, length: int) -> NoReturn:
+    def open(self, logical_block_num: int, length: int) -> NoReturn:
         raise NotImplementedError("Virtual Partition not yet supported")
 
 
@@ -468,10 +468,10 @@ class UDFMetadataPartition(UDFPartition):
     they are clustered together, they are more efficient to read than from the main partition when seeks are expensive.
     """
 
-    def __init__(self, fs: UDFDisc, physical_partition_descriptor: c_udf.udf_partition_descriptor) -> None:
-        super().__init__(fs, physical_partition_descriptor)
+    def __init__(self, disc: UDF, physical_partition_descriptor: c_udf.udf_partition_descriptor) -> None:
+        super().__init__(disc, physical_partition_descriptor)
 
-    def open_extent(self, logical_block_num: int, length: int) -> NoReturn:
+    def open(self, logical_block_num: int, length: int) -> NoReturn:
         raise NotImplementedError("Metadata Partition not yet supported")
 
 
@@ -515,7 +515,7 @@ def parse_udf_timestamp(timestamp: c_udf.udf_timestamp) -> datetime:
     )
 
 
-def get_udf_sector_size(fh: BinaryIO) -> int | None:
+def find_udf_sector_size(fh: BinaryIO) -> int | None:
     """Try to find the sector size of the UDF disc by looking for the AVDP tag at various sector sizes."""
     for sector_size in SECTOR_SIZES:
         try:
@@ -533,3 +533,15 @@ def get_udf_sector_size(fh: BinaryIO) -> int | None:
             return sector_size
 
     return None
+
+
+def load_udf(fh: BinaryIO) -> UDF | None:
+    """Load a UDF disc if it is compatible.
+
+    Args:
+        fh: The file-like object representing the disc image.
+    """
+    try:
+        return UDF(fh)
+    except ValueError:
+        return None

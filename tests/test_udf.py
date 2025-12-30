@@ -1,9 +1,10 @@
+from __future__ import annotations
+
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import BinaryIO
 
-from dissect.disc.disc import DISC, DiscFormat, log
-
+from dissect.disc.disc import Disc, Format, log
 from tests.test_iso import genisoimage_joliet_filename
 
 log.setLevel(logging.DEBUG)
@@ -11,9 +12,9 @@ LONG_FILENAME = "long_filename_" + ("a" * 236) + ".txt"
 
 
 def test_udf_only_iso(udf_only_iso: BinaryIO) -> None:
-    disc = DISC(udf_only_iso)
+    disc = Disc(udf_only_iso)
 
-    assert disc.selected_format == DiscFormat.UDF
+    assert disc.selected == Format.UDF
     assert disc.name == "LinuxUDF"
     assert disc.application == "*Linux UDFFS"
     assert disc.publisher == "*Linux mkudffs 2.3"
@@ -71,9 +72,9 @@ def test_udf_only_iso(udf_only_iso: BinaryIO) -> None:
 
 
 def test_hybrid_iso_udf(hybrid_iso: BinaryIO) -> None:
-    disc = DISC(hybrid_iso)
+    disc = Disc(hybrid_iso)
 
-    assert disc.selected_format == DiscFormat.UDF
+    assert disc.selected == Format.UDF
     assert disc.name == "DISSECTGREATESTHITS"
     assert disc.application == "*genisoimage"
     assert disc.publisher == ""
