@@ -19,12 +19,11 @@ def test_udf_only_iso(udf_only_iso: BinaryIO) -> None:
     assert disc.application == "*Linux UDFFS"
     assert disc.publisher == "*Linux mkudffs 2.3"
 
+    assert disc.get("/") is disc.fs.root
+
     # Test deep directory hierarchy
     entry = disc.get("/1/2/3/4/5/6/7/8/9/10/test.txt")
-
-    contents = entry.open().read()
-    assert entry.name == "test.txt"
-    assert contents == b"Hello World!\n"
+    assert entry.open().read() == b"Hello World!\n"
     assert entry.mode & 0o777 == 0o644
 
     assert entry.mtime == datetime(2024, 7, 23, 10, 5, 41, tzinfo=timezone(timedelta(seconds=15360)))
@@ -81,10 +80,7 @@ def test_hybrid_iso_udf(hybrid_iso: BinaryIO) -> None:
 
     # Test deep directory hierarchy
     entry = disc.get("/1/2/3/4/5/6/7/8/9/10/test.txt")
-
-    contents = entry.open().read()
-    assert entry.name == "test.txt"
-    assert contents == b"Hello World!\n"
+    assert entry.open().read() == b"Hello World!\n"
     assert entry.mode & 0o777 == 0o444
 
     directory = disc.get("/1/2/3/4/5/6/7/8/9/10")

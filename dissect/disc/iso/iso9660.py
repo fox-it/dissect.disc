@@ -8,14 +8,12 @@ from typing import TYPE_CHECKING, BinaryIO
 
 from dissect.util.stream import RangeStream
 
-from dissect.disc.base import BaseDisc, BaseEntry
+from dissect.disc.base import BaseDirEntry, BaseDisc, BaseEntry
 from dissect.disc.exception import FileNotFoundError, IsADirectoryError
 from dissect.disc.iso.c_iso9660 import c_iso
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-
-    from typing_extensions import Self
 
 
 class ISO9660(BaseDisc):
@@ -39,7 +37,7 @@ class ISO9660(BaseDisc):
         self.encoding = encoding
         self.primary_volume = self._find_primary_volume_descriptor()
 
-        self.root = self._make_record(c_iso.iso_directory_record(self.primary_volume.root_directory_record))
+        self.root = self._make_entry(c_iso.iso_directory_record(self.primary_volume.root_directory_record))
 
     def _find_primary_volume_descriptor(self) -> c_iso.iso_primary_descriptor:
         for block, descriptor in read_descriptors(self.fh):
@@ -64,8 +62,11 @@ class ISO9660(BaseDisc):
     def block_size(self) -> int:
         return self.primary_volume.logical_block_size
 
-    def _make_record(self, record: c_iso.iso_directory_record) -> ISO9660Entry:
+    def _make_entry(self, record: c_iso.iso_directory_record) -> ISO9660Entry:
         return ISO9660Entry(self, record)
+
+    def _make_direntry(self, record: c_iso.iso_directory_record) -> ISO9660DirEntry:
+        return ISO9660DirEntry(self, record)
 
     def get(self, path: str, use_path_table: bool = False) -> ISO9660Entry:
         """Return an entry for a given path.
@@ -98,12 +99,12 @@ class ISO9660(BaseDisc):
 
         if lookup_filename is None:
             # The requested path is the record we have just looked up
-            return self._make_record(record)
+            return self._make_entry(record)
 
         # The requested path is a file located in the directory we just looked up
-        for entry in self._make_record(record).iterdir():
+        for entry in self._make_entry(record).iterdir():
             if entry.name == lookup_filename:
-                return entry
+                return entry.get()
 
         raise FileNotFoundError(path)
 
@@ -141,25 +142,35 @@ class ISO9660(BaseDisc):
         return table
 
 
+class ISO9660DirEntry(BaseDirEntry):
+    """A directory entry in a ISO9660 filesystem."""
+
+    disc: ISO9660
+    entry: c_iso.iso_directory_record
+
+    def __init__(self, disc: ISO9660, entry: c_iso.iso_directory_record):
+        if entry.name == b"\x00":
+            name = "."
+        elif entry.name == b"\x01":
+            name = ".."
+        else:
+            name = entry.name.decode(disc.encoding, errors="ignore")
+
+        if not entry.flags.Directory:
+            name, _, _ = name.partition(";")
+
+        super().__init__(disc, entry, name)
+
+    def get(self) -> ISO9660Entry:
+        """Get the file entry this directory entry points to."""
+        return self.disc._make_entry(self.entry)
+
+
 class ISO9660Entry(BaseEntry):
     """A file or directory entry in a ISO9660 filesystem."""
 
     disc: ISO9660
     entry: c_iso.iso_directory_record
-
-    @cached_property
-    def name(self) -> str:
-        if self.entry.name == b"\x00":
-            name = "."
-        elif self.entry.name == b"\x01":
-            name = ".."
-        else:
-            name = self.entry.name.decode(self.disc.encoding, errors="ignore")
-
-        if not self.is_dir():
-            name, _, _ = name.partition(";")
-
-        return name
 
     @property
     def inode(self) -> int:
@@ -208,7 +219,7 @@ class ISO9660Entry(BaseEntry):
         """Return whether this entry is a directory."""
         return bool(self.entry.flags.Directory)
 
-    def iterdir(self) -> Iterator[Self]:
+    def iterdir(self) -> Iterator[ISO9660DirEntry]:
         """Iterate over the contents of this directory."""
         self.disc.fh.seek(self.entry.extent * self.disc.block_size)
         block = self.disc.fh.read(self.size)
@@ -222,19 +233,16 @@ class ISO9660Entry(BaseEntry):
                 break
 
             record = c_iso.iso_directory_record(block[offset:])
-
-            # Instantiate a new instance of whatever class 'self' belongs to.
-            yield type(self)(self.disc, record)
+            yield self.disc._make_direntry(record)
 
             offset += len(record)
-
             if offset % 2 != 0:
                 offset += 1
 
     def open(self) -> RangeStream:
         """Open the file for reading."""
         if self.is_dir():
-            raise IsADirectoryError(self.name)
+            raise IsADirectoryError(self)
 
         # Haven't come across an ISO yet where the file was interleaved.
         if self.entry.interleave:
@@ -285,15 +293,3 @@ def read_descriptors(fh: BinaryIO) -> Iterator[tuple[bytes, c_iso.iso_volume_des
 
         if volume_descriptor.type == c_iso.ISO_VD_END:
             break
-
-
-def load_iso9660(fh: BinaryIO) -> ISO9660 | None:
-    """Load an ISO9660 disc if it is compatible.
-
-    Args:
-        fh: The file-like object representing the disc image.
-    """
-    try:
-        return ISO9660(fh)
-    except ValueError:
-        return None

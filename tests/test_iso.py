@@ -114,7 +114,7 @@ def test_primary_volume_descriptor(hybrid_iso: BinaryIO, preference: Format) -> 
 
 
 @pytest.mark.parametrize(
-    "fs_format",
+    "preference",
     [
         Format.JOLIET,
         Format.ROCKRIDGE,
@@ -128,14 +128,14 @@ def test_primary_volume_descriptor(hybrid_iso: BinaryIO, preference: Format) -> 
         pytest.param(True, id="use_path_table"),
     ],
 )
-def test_notfound_iso(hybrid_iso: BinaryIO, fs_format: Format, use_path_table: bool) -> None:
-    disc = Disc(hybrid_iso, preference=fs_format)
+def test_notfound_iso(hybrid_iso: BinaryIO, preference: Format, use_path_table: bool) -> None:
+    disc = Disc(hybrid_iso, preference=preference)
     with pytest.raises(FileNotFoundError):
         disc.fs.get("1/does_not_exists.txt", use_path_table)
 
 
 @pytest.mark.parametrize(
-    ("fs_format", "filename"),
+    ("preference", "filename"),
     [
         (Format.JOLIET, genisoimage_joliet_filename(LONG_FILENAME)),
         (Format.ROCKRIDGE, LONG_FILENAME),
@@ -149,22 +149,22 @@ def test_notfound_iso(hybrid_iso: BinaryIO, fs_format: Format, use_path_table: b
         pytest.param(True, id="use_path_table"),
     ],
 )
-def test_entry_attributes(hybrid_iso: BinaryIO, fs_format: Format, filename: str, use_path_table: bool) -> None:
-    disc = Disc(hybrid_iso, preference=fs_format)
+def test_entry_attributes(hybrid_iso: BinaryIO, preference: Format, filename: str, use_path_table: bool) -> None:
+    disc = Disc(hybrid_iso, preference=preference)
 
-    assert disc.selected == fs_format
+    assert disc.selected == preference
     entry = disc.fs.get(filename, use_path_table)
 
     mtime = datetime(2024, 3, 9, 12, 25, 25, tzinfo=timezone(timedelta(seconds=3600)))
     ctime = datetime(2024, 5, 21, 20, 29, 5, tzinfo=timezone(timedelta(seconds=7200)))
     atime = datetime(2024, 7, 22, 8, 32, 25, tzinfo=timezone(timedelta(seconds=7200)))
-    if fs_format != Format.ROCKRIDGE:
+    if preference != Format.ROCKRIDGE:
         # Joliet and ISO9660 do not store ctime and atime
         ctime = mtime
         atime = mtime
 
     # Joliet and plain iso9660 do not support file permissions and will default to 0o644.
-    mode = 0o444 if fs_format == Format.ROCKRIDGE else 0o644
+    mode = 0o444 if preference == Format.ROCKRIDGE else 0o644
 
     assert entry.mtime == mtime
     assert entry.ctime == ctime
@@ -185,9 +185,7 @@ def test_rockridge_specific_features(rockridge_joliet_iso: BinaryIO) -> None:
 
     # Test deep directory hierarchy
     entry = disc.get("/1/2/3/4/5/6/7/8/9/10/test.txt")
-    contents = entry.open().read()
-    assert entry.name == "test.txt"
-    assert contents == b"Hello World!\n"
+    assert entry.open().read() == b"Hello World!\n"
     assert entry.mode & 0o777 == 0o444
 
     # Test long filenames

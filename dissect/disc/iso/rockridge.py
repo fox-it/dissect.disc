@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from collections import defaultdict
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -18,16 +17,14 @@ from dissect.disc.iso.c_rockridge import (
 )
 from dissect.disc.iso.iso9660 import (
     ISO9660,
+    ISO9660DirEntry,
     ISO9660Entry,
-    load_iso9660,
     parse_iso9660_timestamp,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from datetime import datetime
-
-log = logging.getLogger(__name__)
 
 
 class RockRidgeTimestampType(IntEnum):
@@ -63,14 +60,82 @@ class RockRidge(ISO9660):
         - https://docplayer.net/29621206-Ieee-p1281-system-use-sharing-protocol-draft-standard-version-1-12-adopted.html
     """
 
-    def _make_record(self, iso9660_record: c_iso.iso_directory_record) -> RockRidgeEntry:
-        return RockRidgeEntry(self, iso9660_record)
+    def __init__(self, fh: BinaryIO):
+        # RockRidge is an extension of ISO9660, so we first have to parse the disc as ISO9660.
+        # The verification here will do a little bit of redundant parsing of ISO9660
+        base = ISO9660(fh)
+
+        # RockRidge is an implementation of the System Use Sharing Protocol (SUSP). So we first check for SUSP
+        # compatibility, then for a RockRidge identifier.
+
+        # Skip past the root record
+        fh.seek((base.block_size * base.root.entry.extent) + c_iso.ROOT_DIRECTORY_RECORD_LENGTH)
+        if fh.read(6) != SUSP_MAGIC:
+            raise ValueError("Not a RockRidge-compliant disc")
+
+        # We have SUSP, but we need to check if it's RockRidge.
+        # From System Use Sharing Protocol documentation per the Extensions Reference record location:
+        # This System Use Entry shall appear in the System Use Area of the first ("." or (00))
+        # Directory Record of the root directory of the Directory Hierarchy in which the extension
+        # specification to which this "ER" System Use Entry refers is used.
+        if (first_directory_record := next(base.root.iterdir(), None)) is None:
+            raise ValueError("Empty root directory in SUSP-compliant disc")
+
+        first_directory_entry = RockRidgeEntry(base, first_directory_record.entry)
+        if first_directory_entry is None or not first_directory_entry.has_system_use_entry(
+            SystemUseSignature.EXTENSIONS_REFERENCE
+        ):
+            raise ValueError("Encountered SUSP-compliant disc but could not detect RockRidge")
+
+        # We can use this to determine what extension is being used that uses SUSP.
+        buf = next(first_directory_entry.get_system_use_entries(SystemUseSignature.EXTENSIONS_REFERENCE))
+        extensions_reference_entry = c_rockridge.SU_ER_s(buf)
+        identifier = extensions_reference_entry.identifier
+        if identifier not in ROCKRIDGE_MAGICS:
+            raise ValueError(
+                f"Encountered SUSP-compliant disc but could not detect RockRidge from extensions identifier {identifier!r}"  # noqa: E501
+            )
+
+        super().__init__(fh)
+
+    def _make_entry(self, record: c_iso.iso_directory_record) -> RockRidgeEntry:
+        return RockRidgeEntry(self, record)
+
+    def _make_direntry(self, record: c_iso.iso_directory_record) -> RockRidgeDirEntry:
+        return RockRidgeDirEntry(self, record)
+
+
+class RockRidgeDirEntry(ISO9660DirEntry):
+    """A directory entry in a Rock Ridge filesystem."""
+
+    disc: RockRidge
+    entry: c_iso.iso_directory_record
+
+    def __init__(self, disc: RockRidge, entry: c_iso.iso_directory_record):
+        super().__init__(disc, entry)
+
+        # Pre-load the file entry for this directory entry, we need to check for alternative names.
+        self._file_entry = self.disc._make_entry(entry)
+
+        # Check for alternative name system use entries and if present, use them to determine the name of this record.
+        if self._file_entry.has_system_use_entry(RockRidgeSignature.ALTERNATIVE_NAME):
+            name = ""
+            for buf in self._file_entry.get_system_use_entries(RockRidgeSignature.ALTERNATIVE_NAME):
+                alternate_name_entry = c_rockridge.RR_NM_s(buf)
+                name += alternate_name_entry.name.decode(self.disc.encoding)
+
+            # Update the name
+            self.name = name
+
+    def get(self) -> RockRidgeEntry:
+        """Get the file entry this directory entry points to."""
+        return self._file_entry
 
 
 class RockRidgeEntry(ISO9660Entry):
     """A file or directory entry in a Rock Ridge filesystem."""
 
-    fs: RockRidge
+    disc: RockRidge
     entry: c_iso.iso_directory_record
 
     def __init__(
@@ -83,9 +148,6 @@ class RockRidgeEntry(ISO9660Entry):
         # Check for a child link system use entry. If this is present, we have to traverse elsewhere to obtain accurate
         # information about this record, such as its actual extent and metadata."""
         if self.has_system_use_entry(RockRidgeSignature.CHILD_LINK):
-            # Pre-cache the name using the old record
-            _ = self.name
-
             buf = next(self.get_system_use_entries(RockRidgeSignature.CHILD_LINK))
             entry = c_rockridge.RR_CL_s(buf)
 
@@ -93,19 +155,6 @@ class RockRidgeEntry(ISO9660Entry):
             self.disc.fh.seek(entry.location * self.disc.block_size)
             record = c_iso.iso_directory_record(self.disc.fh)
             super().__init__(self.disc, record)
-
-    @cached_property
-    def name(self) -> str:
-        # Check for alternative name system use entries and if present, use them to determine the name of this record.
-        if not self.has_system_use_entry(RockRidgeSignature.ALTERNATIVE_NAME):
-            return super().name
-
-        name = ""
-        for alternative_name_buf in self.get_system_use_entries(RockRidgeSignature.ALTERNATIVE_NAME):
-            alternate_name_entry = c_rockridge.RR_NM_s(alternative_name_buf)
-            name += alternate_name_entry.name.decode(self.disc.encoding)
-
-        return name
 
     @property
     def inode(self) -> int:
@@ -286,9 +335,10 @@ class RockRidgeEntry(ISO9660Entry):
         """Returns whether this directory record represents a symlink."""
         return self.has_system_use_entry(RockRidgeSignature.SYMLINK)
 
-    def iterdir(self) -> Iterator[RockRidgeEntry]:
+    def iterdir(self) -> Iterator[RockRidgeDirEntry]:
+        record: RockRidgeDirEntry
         for record in super().iterdir():
-            if record.has_system_use_entry(RockRidgeSignature.RELOCATED):
+            if record._file_entry.has_system_use_entry(RockRidgeSignature.RELOCATED):
                 # This is a relocated entry, and should instead be ignored as it doesn't 'really' live here.
                 continue
             yield record
@@ -296,7 +346,7 @@ class RockRidgeEntry(ISO9660Entry):
     def readlink(self) -> str:
         """Returns what this symlink points to. Raises NotASymlinkError if this is not a symlink."""
         if not self.is_symlink():
-            raise NotASymlinkError(self.name)
+            raise NotASymlinkError(self)
 
         target = ""
         for buf in self.get_system_use_entries(RockRidgeSignature.SYMLINK):
@@ -325,47 +375,3 @@ class RockRidgeEntry(ISO9660Entry):
                     target += "/"
 
         return target
-
-
-def load_rockridge(fh: BinaryIO) -> RockRidge | None:
-    """Load a RockRidge disc if it is compatible."""
-    if (base := load_iso9660(fh)) is None:
-        return None
-
-    # RockRidge is an implementation of the System Use Sharing Protocol (SUSP). So we first check for SUSP
-    # compatibility, then for a RockRidge identifier.
-
-    # Skip past the root record
-    fh.seek((base.block_size * base.root.entry.extent) + c_iso.ROOT_DIRECTORY_RECORD_LENGTH)
-    if fh.read(6) != SUSP_MAGIC:
-        return None
-
-    # We have SUSP, but we need to check if it's RockRidge.
-    rockridge_root_record = RockRidgeEntry(base, base.root.entry)
-
-    # From System Use Sharing Protocol documentation per the Extensions Reference record location:
-    # This System Use Entry shall appear in the System Use Area of the first ("." or (00))
-    # Directory Record of the root directory of the Directory Hierarchy in which the extension
-    # specification to which this "ER" System Use Entry refers is used.
-    first_directory_record = next(rockridge_root_record.iterdir(), None)
-
-    if first_directory_record is not None and first_directory_record.has_system_use_entry(
-        SystemUseSignature.EXTENSIONS_REFERENCE
-    ):
-        # We can use this to determine what extension is being used that uses SUSP.
-        extensions_reference_buf = next(
-            first_directory_record.get_system_use_entries(SystemUseSignature.EXTENSIONS_REFERENCE)
-        )
-        extensions_reference_entry = c_rockridge.SU_ER_s(extensions_reference_buf)
-        identifier = extensions_reference_entry.identifier
-        if identifier in ROCKRIDGE_MAGICS:
-            return RockRidge(fh)
-
-        log.error(
-            "Encountered SUSP-compliant disc but could not detect RockRidge from extensions identifier '%s'",
-            identifier,
-        )
-        return None
-
-    log.error("Encountered SUSP-compliant disc but could not detect RockRidge.")
-    return None

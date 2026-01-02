@@ -21,15 +21,3 @@ class Joliet(ISO9660):
                     return primary_volume
         else:
             raise ValueError("No Joliet primary volume descriptor found")
-
-
-def load_joliet(fh: BinaryIO) -> Joliet | None:
-    """Load a Joliet disc if it is compatible.
-
-    Args:
-        fh: The file-like object representing the disc image.
-    """
-    try:
-        return Joliet(fh)
-    except ValueError:
-        return None

@@ -5,10 +5,10 @@ import os
 from typing import BinaryIO
 
 from dissect.disc.base import BaseDisc, BaseEntry, Format
-from dissect.disc.iso.iso9660 import load_iso9660
-from dissect.disc.iso.joliet import load_joliet
-from dissect.disc.iso.rockridge import load_rockridge
-from dissect.disc.udf.udf import load_udf
+from dissect.disc.iso.iso9660 import ISO9660
+from dissect.disc.iso.joliet import Joliet
+from dissect.disc.iso.rockridge import RockRidge
+from dissect.disc.udf.udf import UDF
 
 log = logging.getLogger(__name__)
 log.setLevel(os.getenv("DISSECT_LOG_DISC", "CRITICAL"))
@@ -42,13 +42,16 @@ class Disc:
         # Try to load all supported filesystems
         # This will do some redundant parsing, but it keeps the code simple.
         for format, loader in [
-            (Format.ISO9660, load_iso9660),
-            (Format.JOLIET, load_joliet),
-            (Format.ROCKRIDGE, load_rockridge),
-            (Format.UDF, load_udf),
+            (Format.ISO9660, ISO9660),
+            (Format.JOLIET, Joliet),
+            (Format.ROCKRIDGE, RockRidge),
+            (Format.UDF, UDF),
         ]:
-            if disc := loader(fh):
-                self.available[format] = disc
+            try:
+                if disc := loader(fh):
+                    self.available[format] = disc
+            except ValueError as e:  # noqa: PERF203
+                log.debug("Could not load %s disc: %s", format.value, e)
 
         if not self.available:
             raise ValueError("No compatible filesystem found on disc")
