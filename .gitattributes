@@ -1,0 +1,2 @@
+# Github does not support LFS for public forks
+# tests/_data/** filter=lfs diff=lfs merge=lfs -text
